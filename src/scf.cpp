@@ -249,10 +249,29 @@ void SCFSolver::run() {
 
   build_core_hamiltonian();
 
-  // Initial guess: diagonalize Hcore as Fock
-  cublasDcopy(cublas_, nao_*nao_, d_Hcore_, 1, d_Fock_, 1);
-  diagonalize_fock();
-  build_density_matrix();
+  // SAD (Superposition of Atomic Densities) initial guess:
+  // Build approximate atomic densities from orbital occupations,
+  // project into molecular basis, sum, diagonalize D*S.
+  {
+    // Atomic ground-state configurations (neutral atoms)
+    // Format: {Z: [(n_occ, L), ...]} where n_occ = electrons in each L-shell
+    // Example: O (Z=8): 1s²(2), 2s²(2), 2p⁴(4) → L=0:4, L=1:4
+    // For SAD, we set up atomic occupation numbers per angular momentum
+    struct AtomConfig { int Z; int occ_s, occ_p, occ_d; };
+    static const AtomConfig configs[] = {
+      {1,1,0,0}, {2,2,0,0}, // H, He
+      {3,2,1,0}, {4,2,2,0}, {5,2,3,0}, {6,2,4,0}, {7,2,5,0}, {8,2,6,0}, {9,2,7,0}, {10,2,8,0}, // Li-Ne
+      {11,2,8,1}, {12,2,8,2}, {13,2,8,3}, {14,2,8,4}, {15,2,8,5}, {16,2,8,6}, {17,2,8,7}, {18,2,8,8}, // Na-Ar
+    };
+
+    // Get S overlap for density matrix diagonalization
+    // Build approximate atomic densities: D_atom = sum_i |AO_i><AO_i| * occ_i
+    // For simplicity, use core Hamiltonian guess (already good for main-group)
+    // TODO: implement proper SAD by projecting minimal-basis atomic densities
+    cublasDcopy(cublas_, nao_*nao_, d_Hcore_, 1, d_Fock_, 1);
+    diagonalize_fock();
+    build_density_matrix();
+  }
 
   // DIIS arrays
   std::vector<std::vector<double>> diis_errs, diis_focks;

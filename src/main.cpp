@@ -361,7 +361,7 @@ int main(int argc, char* argv[]) {
       if (functional_name == "CAM-B3LYP") {
         ex_frac = 0.19; lrc_frac = 0.46; lrc_omega = 0.33;
       } else if (functional_name == "WB97X" || functional_name == "WB97X-V") {
-        ex_frac = 0.0; lrc_frac = 1.0; lrc_omega = 0.3;
+        ex_frac = 0.157706; lrc_frac = 0.842294; lrc_omega = 0.3;
       } else if (functional_name == "WB97M-V") {
         ex_frac = 0.0; lrc_frac = 1.0; lrc_omega = 0.3;
       } else if (functional_name == "LC-WPBE" || functional_name == "LC-WPBEH") {
