@@ -10,7 +10,8 @@
 extern "C" {
 cuestStatus_t nvidia_create_df_plan(
     cuestHandle_t handle, cuestAOBasis_t primary, cuestAOBasis_t aux,
-    const double* xyz, uint64_t natom, cuestDFIntPlan_t* outPlan);
+    const double* xyz, uint64_t natom, cuestDFIntPlan_t* outPlan,
+    double exchange_frac, double lrc_frac, double lrc_omega);
 }
 
 namespace cuest {
@@ -87,13 +88,15 @@ void OneElectronIntegrals::compute_potential(double* d_V, uint64_t natom,
 // ---------------------------------------------------------------------------
 DFJKBuilder::DFJKBuilder(CuESTContext& ctx, cuestAOBasis_t primary_basis,
                            cuestAOBasis_t aux_basis,
-                           const double* xyz_host, uint64_t natom)
+                           const double* xyz_host, uint64_t natom,
+                           double exchange_frac, double lrc_frac, double lrc_omega)
     : ctx_(ctx) {
-  // Use pure-C wrapper (compiled as C, linked as C)
+  // Use pure-C wrapper with exchange parameters for hybrid/LRC functionals
   cuestDFIntPlan_t raw_plan = nullptr;
   CUEST_CHECK(nvidia_create_df_plan(
       static_cast<cuestHandle_t>(ctx_), primary_basis, aux_basis,
-      xyz_host, natom, &raw_plan));
+      xyz_host, natom, &raw_plan,
+      exchange_frac, lrc_frac, lrc_omega));
   *plan_.ptr() = raw_plan;
 }
 
@@ -250,6 +253,14 @@ bool XCBuilder::is_hybrid() {
                           CUEST_XCINTPLAN_IS_HYBRID,
                           &hyb, sizeof(hyb)));
   return hyb != 0;
+}
+
+bool XCBuilder::is_lrc() {
+  int32_t lrc = 0;
+  CUEST_CHECK(cuestQuery(ctx_, CUEST_XCINTPLAN, plan_.get(),
+                          CUEST_XCINTPLAN_IS_LRC_HYBRID,
+                          &lrc, sizeof(lrc)));
+  return lrc != 0;
 }
 
 double XCBuilder::exchange_scale() {

@@ -112,17 +112,22 @@ void SCFSolver::build_fock_matrix(const std::vector<double>& D_host) {
   cublasDcopy(cublas_, nao_*nao_, d_Hcore_, 1, d_Fock_, 1);
   cublasDaxpy(cublas_, nao_*nao_, &two, d_J_, 1, d_Fock_, 1);
 
-  // Hybrid: subtract exact exchange a*K
+  // Hybrid: subtract exact exchange
+  // For standard hybrids (B3LYP, PBE0): DF plan has EXCHANGE_FRACTION=1.0,
+  //   K = full HF exchange, F -= exchange_scale * K
+  // For LRC (CAM-B3LYP, wB97X): DF plan has LRC params set,
+  //   K already range-separated, F -= 1.0 * K
   if (xc_ && xc_->is_hybrid()) {
-    double x_scale = xc_->exchange_scale();
+    bool is_lrc = xc_->is_lrc();
+    double k_factor = is_lrc ? -1.0 : -xc_->exchange_scale();
+
     std::vector<double> Cocc(nao_ * nocc_);
     cudaMemcpy(Cocc.data(), d_C_, nao_*nocc_*sizeof(double), cudaMemcpyDeviceToHost);
     DeviceArray d_Cocc_ke(nao_ * nocc_ * sizeof(double));
     cudaMemcpy(d_Cocc_ke, Cocc.data(), nao_*nocc_*sizeof(double), cudaMemcpyHostToDevice);
 
     dfjk_.compute_K(nocc_, d_Cocc_ke, d_K_);
-    double neg_a = -x_scale;
-    cublasDaxpy(cublas_, nao_*nao_, &neg_a, d_K_, 1, d_Fock_, 1);
+    cublasDaxpy(cublas_, nao_*nao_, &k_factor, d_K_, 1, d_Fock_, 1);
   }
 
   // Add Vxc
@@ -276,8 +281,9 @@ void SCFSolver::run() {
     e_elec_ = 2.0 * (tr_dh + tr_dj) + e_xc_;
     bool hybrid = (xc_ && xc_->is_hybrid());
     if (hybrid) {
+      double k_energy_factor = (xc_ && xc_->is_lrc()) ? 1.0 : xc_->exchange_scale();
       double tr_dk = trace_dot(d_D_, d_K_, N);
-      e_elec_ -= xc_->exchange_scale() * tr_dk;
+      e_elec_ -= k_energy_factor * tr_dk;
     }
     e_total_ = e_elec_ + e_nuc_;
     double dE = (iter_ > 1) ? (e_total_ - e_prev) : 0.0;

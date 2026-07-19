@@ -354,9 +354,25 @@ int main(int argc, char* argv[]) {
     if (use_df && aux_basis_ptr) {
       if (!quiet) std::cout << "Setting up density-fitted J/K builder...\n";
       auto xyz = mol.xyz_host();
+      // DF plan exchange parameters for LRC functionals:
+      // K matrix = EXCHANGE_FRACTION * K_SR + LRC_FRACTION * K_LR(omega)
+      // Standard hybrids: use defaults (ex_frac=1.0, scaling in Fock build)
+      double ex_frac = 1.0, lrc_frac = 0.0, lrc_omega = 0.0;
+      if (functional_name == "CAM-B3LYP") {
+        ex_frac = 0.19; lrc_frac = 0.46; lrc_omega = 0.33;
+      } else if (functional_name == "WB97X" || functional_name == "WB97X-V") {
+        ex_frac = 0.0; lrc_frac = 1.0; lrc_omega = 0.3;
+      } else if (functional_name == "WB97M-V") {
+        ex_frac = 0.0; lrc_frac = 1.0; lrc_omega = 0.3;
+      } else if (functional_name == "LC-WPBE" || functional_name == "LC-WPBEH") {
+        ex_frac = 0.0; lrc_frac = 1.0; lrc_omega = 0.4;
+      } else if (functional_name == "HSE06") {
+        ex_frac = 0.25; lrc_frac = -0.25; lrc_omega = 0.11;
+      }
+
       dfjk = std::make_unique<DFJKBuilder>(
           ctx, basis_builder.basis(), aux_basis_ptr->basis(),
-          xyz.data(), mol.natom());
+          xyz.data(), mol.natom(), ex_frac, lrc_frac, lrc_omega);
       dfjk_ptr = dfjk.get();
     } else {
       std::cerr << "Error: Density fitting is currently required.\n";

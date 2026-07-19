@@ -46,7 +46,8 @@ class DFJKBuilder {
  public:
   DFJKBuilder(CuESTContext& ctx, cuestAOBasis_t primary_basis,
                cuestAOBasis_t aux_basis,
-               const double* xyz_host, uint64_t natom);
+               const double* xyz_host, uint64_t natom,
+               double exchange_frac=0.0, double lrc_frac=0.0, double lrc_omega=0.0);
 
   // Compute Coulomb matrix J from density matrix D
   void compute_J(const double* d_D, double* d_J);
@@ -108,6 +109,7 @@ class XCBuilder {
   cuestXCIntPlan_t plan() const { return plan_.get(); }
   // Query if functional is hybrid (has exact exchange)
   bool is_hybrid();
+  bool is_lrc();            // has long-range correction
   double exchange_scale();  // fraction of HF exchange for hybrids
 
  private:
