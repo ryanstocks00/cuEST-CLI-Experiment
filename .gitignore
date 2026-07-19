@@ -25,3 +25,4 @@ test_minimal*
 test_wrapper*
 data/ch2i2.xyz
 data/def2-svpd.gbs
+data/test_*.xyz
