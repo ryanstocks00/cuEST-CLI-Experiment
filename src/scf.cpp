@@ -99,7 +99,7 @@ void SCFSolver::build_core_hamiltonian() {
 }
 
 // ---------------------------------------------------------------------------
-// Fock matrix: F = Hcore + 2*J + Vxc  (pure DFT, no exact exchange)
+// Fock matrix: F = Hcore + 2*J - a*K + Vxc  (supports hybrids)
 // ---------------------------------------------------------------------------
 void SCFSolver::build_fock_matrix(const std::vector<double>& D_host) {
   cudaMemcpy(d_D_, D_host.data(), nao_*nao_*sizeof(double), cudaMemcpyHostToDevice);
@@ -112,10 +112,22 @@ void SCFSolver::build_fock_matrix(const std::vector<double>& D_host) {
   cublasDcopy(cublas_, nao_*nao_, d_Hcore_, 1, d_Fock_, 1);
   cublasDaxpy(cublas_, nao_*nao_, &two, d_J_, 1, d_Fock_, 1);
 
+  // Hybrid: subtract exact exchange a*K
+  if (xc_ && xc_->is_hybrid()) {
+    double x_scale = xc_->exchange_scale();
+    std::vector<double> Cocc(nao_ * nocc_);
+    cudaMemcpy(Cocc.data(), d_C_, nao_*nocc_*sizeof(double), cudaMemcpyDeviceToHost);
+    DeviceArray d_Cocc_ke(nao_ * nocc_ * sizeof(double));
+    cudaMemcpy(d_Cocc_ke, Cocc.data(), nao_*nocc_*sizeof(double), cudaMemcpyHostToDevice);
+
+    dfjk_.compute_K(nocc_, d_Cocc_ke, d_K_);
+    double neg_a = -x_scale;
+    cublasDaxpy(cublas_, nao_*nao_, &neg_a, d_K_, 1, d_Fock_, 1);
+  }
+
   // Add Vxc
   if (xc_) {
     double exc_val = 0.0;
-    // Extract C_occ from current MO coefficients (first nocc columns of C)
     std::vector<double> Cocc(nao_ * nocc_);
     cudaMemcpy(Cocc.data(), d_C_, nao_*nocc_*sizeof(double), cudaMemcpyDeviceToHost);
     DeviceArray d_Cocc(nao_ * nocc_ * sizeof(double));
@@ -262,6 +274,11 @@ void SCFSolver::run() {
     double tr_dh = trace_dot(d_D_, d_Hcore_, N);
     double tr_dj = trace_dot(d_D_, d_J_, N);
     e_elec_ = 2.0 * (tr_dh + tr_dj) + e_xc_;
+    bool hybrid = (xc_ && xc_->is_hybrid());
+    if (hybrid) {
+      double tr_dk = trace_dot(d_D_, d_K_, N);
+      e_elec_ -= xc_->exchange_scale() * tr_dk;
+    }
     e_total_ = e_elec_ + e_nuc_;
     double dE = (iter_ > 1) ? (e_total_ - e_prev) : 0.0;
 
