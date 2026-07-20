@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -79,12 +80,15 @@ inline std::vector<double> numerical_gradient(
         }
         fclose(f);
 
-        // Build command with ALL parameters forwarded
+        // Build command — quote paths to protect against shell injection
+        auto quote = [](const std::string& s) {
+          return "\"" + s + "\"";
+        };
         std::ostringstream cmd;
-        cmd << binary_path
-            << " --xyz " << tmp
-            << " --basis " << basis_path
-            << " --aux-basis " << aux_path
+        cmd << quote(binary_path)
+            << " --xyz " << quote(tmp)
+            << " --basis " << quote(basis_path)
+            << " --aux-basis " << quote(aux_path)
             << " --functional " << func_name
             << " --radial-pts " << rad_pts
             << " --angular-pts " << ang_pts
@@ -92,7 +96,7 @@ inline std::vector<double> numerical_gradient(
             << " --conv-thresh " << params.conv_thresh
             << " --quiet";
         if (!ecp_path.empty()) {
-          cmd << " --ecp " << ecp_path;
+          cmd << " --ecp " << quote(ecp_path);
         }
         if (!is_pure) {
           cmd << " --no-pure";
@@ -105,8 +109,10 @@ inline std::vector<double> numerical_gradient(
         double e = 0.0;
         bool found = false;
         while (fgets(buf, sizeof(buf), pipe)) {
-          // Match "Final SCF energy: -XX.XXXX Ha" (no leading space)
-          if (sscanf(buf, "Final SCF energy: %lf", &e) == 1) {
+          // Match "Final SCF energy:" with optional leading whitespace
+          const char* key = "Final SCF energy:";
+          const char* pos = strstr(buf, key);
+          if (pos && sscanf(pos + strlen(key), "%lf", &e) == 1) {
             found = true;
           }
         }

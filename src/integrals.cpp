@@ -7,13 +7,6 @@
 #include "cuest_wrapper/context.hpp"
 #include "cuest_wrapper/raii.hpp"
 
-extern "C" {
-cuestStatus_t nvidia_create_df_plan(
-    cuestHandle_t handle, cuestAOBasis_t primary, cuestAOBasis_t aux,
-    const double* xyz, uint64_t natom, cuestDFIntPlan_t* outPlan,
-    double exchange_frac, double lrc_frac, double lrc_omega);
-}
-
 namespace cuest {
 
 // ---------------------------------------------------------------------------
@@ -91,17 +84,67 @@ DFJKBuilder::DFJKBuilder(CuESTContext& ctx, cuestAOBasis_t primary_basis,
                            const double* xyz_host, uint64_t natom,
                            double exchange_frac, double lrc_frac, double lrc_omega)
     : ctx_(ctx) {
-  // Use pure-C wrapper with exchange parameters for hybrid/LRC functionals
-  cuestDFIntPlan_t raw_plan = nullptr;
-  CUEST_CHECK(nvidia_create_df_plan(
-      static_cast<cuestHandle_t>(ctx_), primary_basis, aux_basis,
-      xyz_host, natom, &raw_plan,
-      exchange_frac, lrc_frac, lrc_omega));
-  *plan_.ptr() = raw_plan;
+  // Create pair list (must outlive the DF plan)
+  {
+    cuestWorkspaceDescriptor_t pers_desc{}, temp_desc{};
+    AOPairListParams pl_params;
+    CUEST_CHECK(cuestAOPairListCreateWorkspaceQuery(
+        static_cast<cuestHandle_t>(ctx_), primary_basis, natom, xyz_host,
+        1e-14, pl_params, &pers_desc, &temp_desc, pair_list_.ptr()));
+    void* td_dev = nullptr;
+    if (pers_desc.deviceBufferSizeInBytes)
+      cudaMalloc(&pair_list_persist_dev_, pers_desc.deviceBufferSizeInBytes);
+    if (temp_desc.deviceBufferSizeInBytes)
+      cudaMalloc(&td_dev, temp_desc.deviceBufferSizeInBytes);
+    cuestWorkspace_t pw = {0, pers_desc.hostBufferSizeInBytes,
+                           (uintptr_t)pair_list_persist_dev_,
+                           pers_desc.deviceBufferSizeInBytes};
+    cuestWorkspace_t tw = {0, temp_desc.hostBufferSizeInBytes,
+                           (uintptr_t)td_dev, temp_desc.deviceBufferSizeInBytes};
+    CUEST_CHECK(cuestAOPairListCreate(
+        static_cast<cuestHandle_t>(ctx_), primary_basis, natom, xyz_host,
+        1e-14, pl_params, &pw, &tw, pair_list_.ptr()));
+    if (td_dev) cudaFree(td_dev);
+  }
+
+  // Create DF plan with exchange parameters for hybrid/LRC functionals
+  {
+    DFIntPlanParams df_params;
+    // Configure exchange parameters
+    cuestParametersConfigure(CUEST_DFINTPLAN_PARAMETERS, df_params,
+        CUEST_DFINTPLAN_PARAMETERS_EXCHANGE_FRACTION, &exchange_frac, sizeof(double));
+    cuestParametersConfigure(CUEST_DFINTPLAN_PARAMETERS, df_params,
+        CUEST_DFINTPLAN_PARAMETERS_LRC_EXCHANGE_FRACTION, &lrc_frac, sizeof(double));
+    cuestParametersConfigure(CUEST_DFINTPLAN_PARAMETERS, df_params,
+        CUEST_DFINTPLAN_PARAMETERS_LRC_EXCHANGE_OMEGA, &lrc_omega, sizeof(double));
+
+    cuestWorkspaceDescriptor_t pers_desc{}, temp_desc{};
+    CUEST_CHECK(cuestDFIntPlanCreateWorkspaceQuery(
+        static_cast<cuestHandle_t>(ctx_), primary_basis, aux_basis,
+        pair_list_.get(), df_params, &pers_desc, &temp_desc, plan_.ptr()));
+    void* td_dev = nullptr;
+    if (pers_desc.deviceBufferSizeInBytes)
+      cudaMalloc(&plan_persist_dev_, pers_desc.deviceBufferSizeInBytes);
+    if (temp_desc.deviceBufferSizeInBytes)
+      cudaMalloc(&td_dev, temp_desc.deviceBufferSizeInBytes);
+    cuestWorkspace_t pw = {0, pers_desc.hostBufferSizeInBytes,
+                           (uintptr_t)plan_persist_dev_,
+                           pers_desc.deviceBufferSizeInBytes};
+    cuestWorkspace_t tw = {0, temp_desc.hostBufferSizeInBytes,
+                           (uintptr_t)td_dev, temp_desc.deviceBufferSizeInBytes};
+    CUEST_CHECK(cuestDFIntPlanCreate(
+        static_cast<cuestHandle_t>(ctx_), primary_basis, aux_basis,
+        pair_list_.get(), df_params, &pw, &tw, plan_.ptr()));
+    if (td_dev) cudaFree(td_dev);
+  }
 }
 
 DFJKBuilder::~DFJKBuilder() {
-  if (persist_plan_dev_) cudaFree(persist_plan_dev_);
+  // plan_ must be destroyed before pair_list_ (plan depends on pair_list)
+  plan_.reset();
+  pair_list_.reset();
+  if (plan_persist_dev_) cudaFree(plan_persist_dev_);
+  if (pair_list_persist_dev_) cudaFree(pair_list_persist_dev_);
 }
 
 void DFJKBuilder::compute_J(const double* d_D, double* d_J) {
@@ -157,8 +200,7 @@ cuestXCIntPlanParametersFunctional_t XCBuilder::to_cuest_functional(int id) {
 
 XCBuilder::XCBuilder(CuESTContext& ctx, cuestAOBasis_t basis,
                        cuestMolecularGrid_t mol_grid,
-                       int functional_id,
-                       int /*radial_pts*/, int /*angular_pts*/)
+                       int functional_id)
     : ctx_(ctx), mol_grid_(mol_grid) {
   cuestWorkspaceDescriptor_t pers_desc{}, temp_desc{};
   XCIntPlanParams xc_params;

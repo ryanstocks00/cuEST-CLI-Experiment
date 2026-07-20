@@ -12,7 +12,6 @@
 
 #include <cuest.h>
 
-#include <cstdlib>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
@@ -64,9 +63,9 @@ class Handle {
     return *this;
   }
 
-  HandleT get() const { return h_; }
+  [[nodiscard]] HandleT get() const { return h_; }
   operator HandleT() const { return h_; }
-  bool valid() const { return h_ != nullptr; }
+  [[nodiscard]] bool valid() const { return h_ != nullptr; }
 
   HandleT* ptr() { return &h_; }
 
@@ -86,29 +85,8 @@ class Handle {
     return tmp;
   }
 
-  // Query attribute from handle
-  template <auto Attr>
-  auto query() const {
-    using ResultType = decltype(queryImpl<Attr>());
-    ResultType val{};
-    CUEST_CHECK(cuestQuery(nullptr, QueryFns..., h_, Attr, &val, sizeof(val)));
-    return val;
-  }
-
  private:
-  template <auto Attr>
-  uint64_t queryImpl() const { return 0; }  // default for unknown types
   HandleT h_;
-};
-
-// ---------------------------------------------------------------------------
-// Specialized query helper - only defines what's needed
-// ---------------------------------------------------------------------------
-template <auto Attr>
-struct query_result {};
-template <>
-struct query_result<CUEST_AOBASIS_NUM_AO> {
-  using type = uint64_t;
 };
 
 // ---------------------------------------------------------------------------

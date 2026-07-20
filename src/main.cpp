@@ -39,6 +39,7 @@
 #include <cstring>
 #include <iomanip>
 #include <iostream>
+#include <memory>
 #include <string>
 
 #include "cuest_wrapper/basis.hpp"
@@ -250,11 +251,13 @@ int main(int argc, char* argv[]) {
     auto xyz_data = parse_xyz(xyz_path);
 
     Molecule mol;
+    // parse_xyz already returns coordinates in bohr; add_atom needs raw bohr values.
+    // Use add_atom_bohr to avoid double conversion.
     for (size_t i = 0; i < xyz_data.n_atoms; i++) {
-      double x_ang = xyz_data.xyz[3 * i] / (1.0 / 0.529177210903);
-      double y_ang = xyz_data.xyz[3 * i + 1] / (1.0 / 0.529177210903);
-      double z_ang = xyz_data.xyz[3 * i + 2] / (1.0 / 0.529177210903);
-      mol.add_atom(xyz_data.symbols[i], x_ang, y_ang, z_ang);
+      mol.add_atom_bohr(xyz_data.symbols[i],
+                        xyz_data.xyz[3 * i],
+                        xyz_data.xyz[3 * i + 1],
+                        xyz_data.xyz[3 * i + 2]);
     }
     mol.set_multiplicity(multiplicity);
 
@@ -337,7 +340,7 @@ int main(int argc, char* argv[]) {
 
     // --- Build XC functional ---
     XCBuilder xc(ctx, basis_builder.basis(), mol_grid,
-                  functional_id, radial_pts, angular_pts);
+                  functional_id);
     if (!quiet) {
       std::cout << "Functional: " << functional_name;
       if (xc.is_hybrid())
@@ -473,7 +476,7 @@ int main(int argc, char* argv[]) {
     }
 
     // --- Final output ---
-    if (!quiet || true) {  // always print final energy
+    {  // always print final energy
       std::cout << "\n" << std::string(60, '=') << "\n";
       std::cout << "Final SCF energy: "
                 << std::setprecision(14) << std::fixed

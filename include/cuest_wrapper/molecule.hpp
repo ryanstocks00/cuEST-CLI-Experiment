@@ -4,16 +4,11 @@
  * @brief Molecule representation: atoms, coordinates, charges.
  */
 
-#include <cuda_runtime.h>
-
 #include <cmath>
-#include <cstdint>
-#include <memory>
-#include <stdexcept>
 #include <string>
+#include <stdexcept>
+#include <unordered_set>
 #include <vector>
-
-#include "raii.hpp"
 
 namespace cuest {
 
@@ -33,6 +28,7 @@ class Molecule {
  public:
   Molecule() = default;
 
+  // Add atom with coordinates in angstrom (converts to bohr internally)
   void add_atom(const std::string& symbol, double x_ang, double y_ang,
                 double z_ang, double ang_to_bohr = 1.0 / 0.529177210903) {
     Atom atom;
@@ -44,28 +40,45 @@ class Molecule {
     atoms_.push_back(atom);
   }
 
-  size_t natom() const { return atoms_.size(); }
-  const Atom& atom(size_t i) const { return atoms_[i]; }
-  const std::vector<Atom>& atoms() const { return atoms_; }
+  // Add atom with coordinates already in bohr (no conversion)
+  void add_atom_bohr(const std::string& symbol, double x_bohr,
+                     double y_bohr, double z_bohr) {
+    Atom atom;
+    atom.symbol = symbol;
+    atom.x = x_bohr;
+    atom.y = y_bohr;
+    atom.z = z_bohr;
+    atom.atomic_number = symbol_to_z(symbol);
+    atoms_.push_back(atom);
+  }
+
+  [[nodiscard]] size_t natom() const { return atoms_.size(); }
+  [[nodiscard]] const Atom& atom(size_t i) const {
+    if (i >= atoms_.size())
+      throw std::out_of_range("Atom index " + std::to_string(i) +
+                              " out of range [0, " + std::to_string(atoms_.size()) + ")");
+    return atoms_[i];
+  }
+  [[nodiscard]] const std::vector<Atom>& atoms() const { return atoms_; }
 
   // Total number of electrons (neutral)
-  int nelec() const {
+  [[nodiscard]] int nelec() const {
     int nel = 0;
     for (const auto& a : atoms_) nel += a.atomic_number;
     return nel;
   }
 
   // Number of occupied orbitals (RHF/RKS: nalpha = nbeta = nelec/2)
-  int nocc() const { return nelec() / 2; }
+  [[nodiscard]] int nocc() const { return nelec() / 2; }
 
   // Spin multiplicity info
-  int multiplicity() const { return multiplicity_; }
+  [[nodiscard]] int multiplicity() const { return multiplicity_; }
   void set_multiplicity(int mult) { multiplicity_ = mult; }
-  int nalpha() const { return (nelec() + multiplicity_ - 1) / 2; }
-  int nbeta() const { return (nelec() - multiplicity_ + 1) / 2; }
+  [[nodiscard]] int nalpha() const { return (nelec() + multiplicity_ - 1) / 2; }
+  [[nodiscard]] int nbeta() const { return (nelec() - multiplicity_ + 1) / 2; }
 
   // Coordinate arrays for cuEST
-  std::vector<double> xyz_host() const {
+  [[nodiscard]] std::vector<double> xyz_host() const {
     std::vector<double> xyz(natom() * 3);
     for (size_t i = 0; i < natom(); i++) {
       xyz[3 * i] = atoms_[i].x;
@@ -76,31 +89,26 @@ class Molecule {
   }
 
   // Charges for cuEST: -1 * nuclear_charge (electron = -1 convention)
-  std::vector<double> charges_host() const {
+  [[nodiscard]] std::vector<double> charges_host() const {
     std::vector<double> c(natom());
     for (size_t i = 0; i < natom(); i++)
       c[i] = -1.0 * atoms_[i].atomic_number;
     return c;
   }
 
-  // Unique element symbols
-  std::vector<std::string> unique_symbols() const {
+  // Unique element symbols (O(1) via unordered_set)
+  [[nodiscard]] std::vector<std::string> unique_symbols() const {
+    std::unordered_set<std::string> seen;
     std::vector<std::string> uniq;
     for (const auto& a : atoms_) {
-      bool found = false;
-      for (const auto& u : uniq) {
-        if (u == a.symbol) {
-          found = true;
-          break;
-        }
-      }
-      if (!found) uniq.push_back(a.symbol);
+      if (seen.insert(a.symbol).second)
+        uniq.push_back(a.symbol);
     }
     return uniq;
   }
 
   // Total nuclear repulsion energy
-  double nuclear_repulsion() const {
+  [[nodiscard]] double nuclear_repulsion() const {
     double enuc = 0.0;
     for (size_t i = 0; i < natom(); i++) {
       for (size_t j = i + 1; j < natom(); j++) {
@@ -114,8 +122,8 @@ class Molecule {
     return enuc;
   }
 
- private:
-  static int symbol_to_z(const std::string& sym) {
+  // Symbol-to-atomic-number lookup (shared with parsers)
+  [[nodiscard]] static int symbol_to_z(const std::string& sym) {
     static const char* elements[] = {
         "X",  "H",  "HE", "LI", "BE", "B",  "C",  "N",  "O",  "F",  "NE",
         "NA", "MG", "AL", "SI", "P",  "S",  "CL", "AR", "K",  "CA",
@@ -136,6 +144,8 @@ class Molecule {
     }
     throw std::runtime_error("Unknown element: " + sym);
   }
+
+ private:
 
   std::vector<Atom> atoms_;
   int multiplicity_{1};  // 1=singlet, 2=doublet, 3=triplet, etc.

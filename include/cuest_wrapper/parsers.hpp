@@ -10,15 +10,13 @@
 
 #include <cctype>
 #include <cmath>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
 #include <fstream>
-#include <iostream>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+#include "molecule.hpp"
 
 namespace cuest {
 
@@ -399,36 +397,17 @@ inline XYZData parse_xyz(const std::string& filepath,
 
     std::istringstream iss(line);
     std::string sym;
-    double x, y, zz;
-    if (!(iss >> sym >> x >> y >> zz))
+    double x, y, z;
+    if (!(iss >> sym >> x >> y >> z))
       throw std::runtime_error("Failed to parse atom " + std::to_string(i));
 
     data.symbols[i] = detail::to_upper(sym);
     data.xyz[3 * i] = x * ang_to_bohr;
     data.xyz[3 * i + 1] = y * ang_to_bohr;
-    data.xyz[3 * i + 2] = zz * ang_to_bohr;
+    data.xyz[3 * i + 2] = z * ang_to_bohr;
 
-    // Determine atomic number for charge
-    static const char* elements[] = {
-        "X",  "H",  "HE", "LI", "BE", "B",  "C",  "N",  "O",  "F",  "NE",
-        "NA", "MG", "AL", "SI", "P",  "S",  "CL", "AR", "K",  "CA",
-        "SC", "TI", "V",  "CR", "MN", "FE", "CO", "NI", "CU", "ZN",
-        "GA", "GE", "AS", "SE", "BR", "KR"};
-    int atomic_z = 0;
-    for (int j = 0; j < 37; j++)
-      if (data.symbols[i] == elements[j]) { atomic_z = j; break; }
-    if (atomic_z == 0 && data.symbols[i] != "X") {
-      // Try extended set
-      static const char* ext[] = {
-        "RB","SR","Y","ZR","NB","MO","TC","RU","RH","PD","AG","CD","IN","SN",
-        "SB","TE","I","XE","CS","BA","LA","CE","PR","ND","PM","SM","EU","GD",
-        "TB","DY","HO","ER","TM","YB","LU","HF","TA","W","RE","OS","IR","PT",
-        "AU","HG","TL","PB","BI","PO","AT","RN","FR","RA","AC","TH","PA","U",
-        "NP","PU","AM","CM","BK","CF","ES","FM","MD","NO","LR","RF","DB","SG",
-        "BH","HS","MT","DS","RG","CN","NH","FL","MC","LV","TS","OG"};
-      for (int j = 0; j < 82; j++)
-        if (data.symbols[i] == ext[j]) { atomic_z = j + 37; break; }
-    }
+    // Determine atomic number using shared element lookup
+    int atomic_z = Molecule::symbol_to_z(data.symbols[i]);
     data.charges[i] = -1.0 * static_cast<double>(atomic_z);
   }
 

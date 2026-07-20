@@ -39,6 +39,9 @@ class OneElectronIntegrals {
   Workspace persistent_ws_;
 };
 
+// Named constant for max GPU variable buffer (2 GB)
+constexpr size_t kDefaultVariableBufBytes = 2000000000ULL;
+
 // ---------------------------------------------------------------------------
 // Density-fitted J and K matrix builder
 // ---------------------------------------------------------------------------
@@ -54,15 +57,17 @@ class DFJKBuilder {
 
   // Compute exchange matrix K from occupied orbitals Cocc
   void compute_K(uint64_t nocc, const double* d_Cocc, double* d_K,
-                 size_t variable_buf_bytes = 2000000000ULL);
+                 size_t variable_buf_bytes = kDefaultVariableBufBytes);
 
   ~DFJKBuilder();
-  cuestDFIntPlan_t plan() const { return plan_.get(); }
+  [[nodiscard]] cuestDFIntPlan_t plan() const { return plan_.get(); }
 
  private:
   CuESTContext& ctx_;
   DFIntPlanHandle plan_;
-  void* persist_plan_dev_{nullptr};
+  AOPairListHandle pair_list_;          // pair list must outlive plan
+  void* pair_list_persist_dev_{nullptr}; // pair list persistent workspace
+  void* plan_persist_dev_{nullptr};      // DF plan persistent workspace
 };
 
 // ---------------------------------------------------------------------------
@@ -90,8 +95,7 @@ class XCBuilder {
 
   XCBuilder(CuESTContext& ctx, cuestAOBasis_t basis,
              cuestMolecularGrid_t mol_grid,
-             int functional_id,
-             int radial_pts = 75, int angular_pts = 302);
+             int functional_id);
 
   // RKS: restricted Kohn-Sham Vxc
   void compute_vxc_rks(uint64_t nocc, const double* d_Cocc,

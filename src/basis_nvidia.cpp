@@ -22,6 +22,9 @@ extern "C" {
 
 namespace cuest {
 
+// Forward declarations
+static void free_xyz(parsedXYZFile_t* xyz);
+
 // NVIDIA's formAOShells requires a parsedXYZFile_t*, so we create one from Molecule
 static parsedXYZFile_t* make_xyz(const Molecule& mol) {
   auto xyz_h = mol.xyz_host();
@@ -29,10 +32,15 @@ static parsedXYZFile_t* make_xyz(const Molecule& mol) {
   size_t n = mol.natom();
 
   parsedXYZFile_t* xyz = (parsedXYZFile_t*)malloc(sizeof(parsedXYZFile_t));
+  if (!xyz) throw std::bad_alloc();
   xyz->numAtoms = n;
   xyz->xyzCPU = (double*)malloc(3*n*sizeof(double));
   xyz->chargesCPU = (double*)malloc(n*sizeof(double));
   xyz->symbols = (char**)malloc(n*sizeof(char*));
+  if (!xyz->xyzCPU || !xyz->chargesCPU || !xyz->symbols) {
+    free_xyz(xyz);
+    throw std::bad_alloc();
+  }
   for (size_t i=0; i<n; i++) {
     xyz->xyzCPU[3*i] = xyz_h[3*i];
     xyz->xyzCPU[3*i+1] = xyz_h[3*i+1];
@@ -40,9 +48,9 @@ static parsedXYZFile_t* make_xyz(const Molecule& mol) {
     xyz->chargesCPU[i] = charges_h[i];
     const auto& sym = mol.atom(i).symbol;
     xyz->symbols[i] = (char*)malloc(sym.size()+1);
+    if (!xyz->symbols[i]) { free_xyz(xyz); throw std::bad_alloc(); }
     strcpy(xyz->symbols[i], sym.c_str());
   }
-  // GPU copies (simplified: formAOShells doesn't use GPU data)
   cudaMalloc(&xyz->xyzGPU, 3*n*sizeof(double));
   cudaMalloc(&xyz->chargesGPU, n*sizeof(double));
   cudaMemcpy(xyz->xyzGPU, xyz->xyzCPU, 3*n*sizeof(double), cudaMemcpyHostToDevice);
@@ -54,15 +62,16 @@ static void free_xyz(parsedXYZFile_t* xyz) {
   if (!xyz) return;
   free(xyz->xyzCPU);
   free(xyz->chargesCPU);
-  for (size_t i=0; i<xyz->numAtoms; i++) free(xyz->symbols[i]);
-  free(xyz->symbols);
+  if (xyz->symbols) {
+    for (size_t i=0; i<xyz->numAtoms; i++) free(xyz->symbols[i]);
+    free(xyz->symbols);
+  }
   if (xyz->xyzGPU) cudaFree(xyz->xyzGPU);
   if (xyz->chargesGPU) cudaFree(xyz->chargesGPU);
   free(xyz);
 }
 
 void BasisBuilder::build_nvidia(const std::string& gbs_path) {
-  // Use NVIDIA's proven formAOShells helper
   auto* xyz = make_xyz(mol_);
   AtomShellData_t* shellData = formAOShells(ctx_, xyz, gbs_path.c_str(), is_pure_);
 
@@ -113,29 +122,8 @@ void BasisBuilder::build_from_gbs(const std::string& gbs_path) {
 }
 
 void AuxBasis::build_from_gbs(const std::string& gbs_path) {
-  // Also use NVIDIA helper for consistency
-  auto xyz_h = mol_.xyz_host();
-  auto charges_h = mol_.charges_host();
+  auto* xyz = make_xyz(mol_);
   size_t n = mol_.natom();
-
-  parsedXYZFile_t* xyz = (parsedXYZFile_t*)malloc(sizeof(parsedXYZFile_t));
-  xyz->numAtoms = n;
-  xyz->xyzCPU = (double*)malloc(3*n*sizeof(double));
-  xyz->chargesCPU = (double*)malloc(n*sizeof(double));
-  xyz->symbols = (char**)malloc(n*sizeof(char*));
-  for (size_t i=0; i<n; i++) {
-    xyz->xyzCPU[3*i] = xyz_h[3*i];
-    xyz->xyzCPU[3*i+1] = xyz_h[3*i+1];
-    xyz->xyzCPU[3*i+2] = xyz_h[3*i+2];
-    xyz->chargesCPU[i] = charges_h[i];
-    const auto& sym = mol_.atom(i).symbol;
-    xyz->symbols[i] = (char*)malloc(sym.size()+1);
-    strcpy(xyz->symbols[i], sym.c_str());
-  }
-  cudaMalloc(&xyz->xyzGPU, 3*n*sizeof(double));
-  cudaMalloc(&xyz->chargesGPU, n*sizeof(double));
-  cudaMemcpy(xyz->xyzGPU, xyz->xyzCPU, 3*n*sizeof(double), cudaMemcpyHostToDevice);
-  cudaMemcpy(xyz->chargesGPU, xyz->chargesCPU, n*sizeof(double), cudaMemcpyHostToDevice);
 
   AtomShellData_t* shellData = formAOShells(ctx_, xyz, gbs_path.c_str(), is_pure_);
   uint64_t total_shells = shellData->numShellsTotal;

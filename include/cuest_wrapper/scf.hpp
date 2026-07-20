@@ -92,8 +92,7 @@ class SCFSolver {
   DeviceArray d_Fock_, d_D_, d_D_old_, d_C_;
   DeviceArray d_J_, d_K_, d_Vxc_;
   DeviceArray d_eigvals_, d_xyz_, d_charges_;
-  DeviceArray d_Fwork_, d_Swork_, d_diis_err_;  // workspaces
-  DeviceArray d_Hcore_host_buf_;  // for Hcore host copy
+  DeviceArray d_Fwork_, d_Swork_;  // workspaces
 };
 
 }  // namespace cuest

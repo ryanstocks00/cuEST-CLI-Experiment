@@ -7,7 +7,6 @@
 #include <cuest.h>
 
 #include <cstdint>
-#include <vector>
 
 #include "raii.hpp"
 
@@ -16,10 +15,11 @@ namespace cuest {
 class CuESTContext {
  public:
   CuESTContext() {
-    cuestHandleParameters_t hp;
+    cuestHandleParameters_t hp = nullptr;
     CUEST_CHECK(cuestParametersCreate(CUEST_HANDLE_PARAMETERS, &hp));
-    CUEST_CHECK(cuestCreate(hp, &handle_));
-    CUEST_CHECK(cuestParametersDestroy(CUEST_HANDLE_PARAMETERS, hp));
+    cuestStatus_t st = cuestCreate(hp, &handle_);
+    cuestParametersDestroy(CUEST_HANDLE_PARAMETERS, hp);
+    CUEST_CHECK(st);  // check after destroying hp to avoid leak
   }
 
   ~CuESTContext() {
