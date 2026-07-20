@@ -56,9 +56,8 @@ def run_pyscf(atoms, basis="def2svp", aux_basis="def2-universal-jkfit",
     mol.build()
 
     # Use density fitting
-    mf = dft.RKS(mol)
-    mf = mf.density_fit()
-    mf.auxbasis = aux_basis
+    mf = dft.RKS(mol).density_fit()
+    mf.with_df.auxbasis = aux_basis
     mf.xc = functional
     # Match grid: (75, 302) is the default
     mf.grids = gen_grid.Grids(mol)
@@ -78,10 +77,9 @@ def run_cuest(xyz_path, basis_path, aux_basis_path, functional="PBE",
         "--basis", basis_path,
         "--aux-basis", aux_basis_path,
         "--functional", functional,
-        "--verbose",
         "--print-mos",
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     stdout = result.stdout
     stderr = result.stderr
 

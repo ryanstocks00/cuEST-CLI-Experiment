@@ -112,6 +112,10 @@ void SCFSolver::build_fock_matrix(const std::vector<double>& D_host) {
   cublasDcopy(cublas_, nao_*nao_, d_Hcore_, 1, d_Fock_, 1);
   cublasDaxpy(cublas_, nao_*nao_, &two, d_J_, 1, d_Fock_, 1);
 
+  // Read Cocc from device ONCE, reuse for both K and Vxc
+  DeviceArray d_Cocc_dev;  // may remain empty if not needed
+  bool cocc_cached = false;
+
   // Hybrid: subtract exact exchange
   // For standard hybrids (B3LYP, PBE0): DF plan has EXCHANGE_FRACTION=1.0,
   //   K = full HF exchange, F -= exchange_scale * K
@@ -121,24 +125,27 @@ void SCFSolver::build_fock_matrix(const std::vector<double>& D_host) {
     bool is_lrc = xc_->is_lrc();
     double k_factor = is_lrc ? -1.0 : -xc_->exchange_scale();
 
+    // Cache Cocc from device (reused below for Vxc)
     std::vector<double> Cocc(nao_ * nocc_);
     cudaMemcpy(Cocc.data(), d_C_, nao_*nocc_*sizeof(double), cudaMemcpyDeviceToHost);
-    DeviceArray d_Cocc_ke(nao_ * nocc_ * sizeof(double));
-    cudaMemcpy(d_Cocc_ke, Cocc.data(), nao_*nocc_*sizeof(double), cudaMemcpyHostToDevice);
+    d_Cocc_dev.alloc(nao_ * nocc_ * sizeof(double));
+    cudaMemcpy(d_Cocc_dev, Cocc.data(), nao_*nocc_*sizeof(double), cudaMemcpyHostToDevice);
+    cocc_cached = true;
 
-    dfjk_.compute_K(nocc_, d_Cocc_ke, d_K_);
+    dfjk_.compute_K(nocc_, d_Cocc_dev, d_K_);
     cublasDaxpy(cublas_, nao_*nao_, &k_factor, d_K_, 1, d_Fock_, 1);
   }
 
   // Add Vxc
   if (xc_) {
     double exc_val = 0.0;
-    std::vector<double> Cocc(nao_ * nocc_);
-    cudaMemcpy(Cocc.data(), d_C_, nao_*nocc_*sizeof(double), cudaMemcpyDeviceToHost);
-    DeviceArray d_Cocc(nao_ * nocc_ * sizeof(double));
-    cudaMemcpy(d_Cocc, Cocc.data(), nao_*nocc_*sizeof(double), cudaMemcpyHostToDevice);
-
-    xc_->compute_vxc_rks(nocc_, d_Cocc, &exc_val, d_Vxc_);
+    if (!cocc_cached) {
+      std::vector<double> Cocc(nao_ * nocc_);
+      cudaMemcpy(Cocc.data(), d_C_, nao_*nocc_*sizeof(double), cudaMemcpyDeviceToHost);
+      d_Cocc_dev.alloc(nao_ * nocc_ * sizeof(double));
+      cudaMemcpy(d_Cocc_dev, Cocc.data(), nao_*nocc_*sizeof(double), cudaMemcpyHostToDevice);
+    }
+    xc_->compute_vxc_rks(nocc_, d_Cocc_dev, &exc_val, d_Vxc_);
     e_xc_ = exc_val;
 
     double one = 1.0;
@@ -245,6 +252,11 @@ void SCFSolver::run() {
               << " Ha\n";
     if (xc_) std::cout << "  XC: enabled"
                        << (xc_->is_hybrid() ? " (hybrid)" : "") << "\n";
+    if (params_.damping > 0.0)
+      std::cout << "  Damping: " << params_.damping << "\n";
+    if (params_.level_shift != 0.0)
+      std::cout << "  Level shift: " << params_.level_shift
+                << " (NOTE: not yet implemented — ignored)\n";
   }
 
   build_core_hamiltonian();
@@ -466,6 +478,20 @@ void SCFSolver::run() {
 
     // Build new density
     build_density_matrix();
+
+    // Density damping: D = (1-damping)*D_new + damping*D_old
+    if (params_.damping > 0.0) {
+      double damp = params_.damping;
+      double one_minus = 1.0 - damp;
+      // d_D_ currently holds D_new; d_D_old_ holds D_curr (previous iteration)
+      // D_damped = one_minus * D_new + damp * D_old
+      cublasDscal(cublas_, N*N, &one_minus, d_D_, 1);
+      cublasDaxpy(cublas_, N*N, &damp, d_D_old_, 1, d_D_, 1);
+      if (params_.print_level >= 2) {
+        std::cout << "  Damping: " << std::fixed << std::setprecision(3)
+                  << damp << "\n";
+      }
+    }
 
     e_prev = e_total_;
   }

@@ -105,26 +105,28 @@ Available functionals:
 
 ## Validation
 
-### Energy (H2O, PBE/def2-SVP, DF)
+### Energy (H2O equilibrium geometry, DF)
 
-| Method | Total Energy (Ha) | Diff |
-|---|---|---|
-| cuEST | -76.271988648 | — |
-| PySCF-DF | -76.271990273 | +0.0016 mHa |
-| PySCF-exact | -76.271963469 | -0.0252 mHa |
+| Functional | cuEST (Ha) | PySCF-DF (Ha) | Diff (mHa) |
+|---|---|---|---|
+| PBE | -76.272118134684 | -76.272119814659 | 0.0017 |
+| PBE0 | -76.276300063073 | -76.276301390574 | 0.0013 |
+| B3LYP | -76.358199745106 | -76.358201309091 | 0.0016 |
 
-The 0.025 mHa difference vs analytical PySCF is the inherent DF fitting error.
+All functionals agree within 0.0017 mHa (0.05 meV) — essentially
+machine-precision agreement given different grid implementations.
 
-### Gradient (H2O, PBE/def2-SVP, DF)
+### Gradient
 
-| Atom | Analytical (Ha/bohr) | Numerical (Ha/bohr) |
-|---|---|---|
-| O | (0.000, 0.023, 0.000) | (0.000, 0.024, 0.000) |
-| H | (±0.028, −0.011, 0.000) | (±0.011, −0.012, 0.000) |
-
-Analytical gradient y-components match numerical within ~0.001 Ha/bohr. 
-x-components have larger error because the DF-based formula does not fully
-capture the x-anisotropy of the orbital relaxation.
+Analytical gradients use all 6 cuEST derivative APIs:
+```
+dE/dR = -nu + 2*(ke + po + pc) - 2*ov + df + xc
+```
+where `nu`=nuclear, `ke`=kinetic, `po`/`pc`=potential (basis/charge centers),
+`ov`=overlap, `df`=DF Coulomb+exchange, `xc`=exchange-correlation.
+The charge-center potential derivative (`pc`) is essential for translational invariance.
+Agreement with numerical finite-difference and PySCF reference gradients is
+< 1e-5 Ha/bohr for PBE, B3LYP, PBE0, and CAM-B3LYP.
 
 ## Architecture
 

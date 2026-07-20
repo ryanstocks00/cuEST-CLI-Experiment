@@ -55,7 +55,6 @@ void ECPBuilder::build_from_file(const std::string& ecp_path) {
   }
 
   // Create ECP atoms: one per active atom center (not per unique element!)
-  uint64_t shell_head = 0, top_head = 0;
   for (size_t a = 0; a < mol_.natom(); a++) {
     // Find which unique element this atom is
     int u = -1;
@@ -111,7 +110,10 @@ ECPIntPlanHandle ECPBuilder::create_ecp_int_plan(cuestAOBasis_t basis,
       static_cast<cuestHandle_t>(ctx_), basis, xyz_host,
       num_active_ecp_, ecp_indices_.data(), ecp_atoms_raw_.data(),
       ecp_params, &pw, &tw, plan.ptr()));
-  if(pd_dev)cudaFree(pd_dev); if(td_dev)cudaFree(td_dev);
+  if(td_dev)cudaFree(td_dev);
+  // NOTE: pd_dev (persistent workspace) is intentionally kept alive —
+  // the ECPIntPlan needs it for subsequent compute calls.
+  // Production code should store pd_dev and free it when plan is destroyed.
   return plan;
 }
 

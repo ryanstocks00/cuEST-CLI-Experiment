@@ -412,13 +412,38 @@ int main(int argc, char* argv[]) {
 
     // --- Gradient computation ---
     if (gradient && scf.converged()) {
-      // Analytical gradient (fast, uses densityScale=1.29 calibration)
+      // Analytical gradient (full electronic + nuclear, all cuEST derivative APIs)
       auto C_host = scf.mo_coefficients_host();
       auto D_host = scf.density_host();
       GradientComputer gc(ctx, basis_builder, *dfjk_ptr, &xc, ecp_int_ptr, mol, scf.orbital_energies(), C_host, D_host);
       auto analytical = gc.compute();
 
-      std::cout << "\n=== Analytical Gradient (Ha/bohr) ===\n";
+      // Debug: print individual gradient components for validation
+      if (verbose) {
+        auto print_comp = [&](const char* label, const std::vector<double>& g) {
+          std::cout << "  " << label;
+          for (size_t a = 0; a < mol.natom(); a++)
+            std::cout << " [" << std::setw(9) << g[3*a] << " " << std::setw(9)
+                      << g[3*a+1] << " " << std::setw(9) << g[3*a+2] << "]";
+          std::cout << "\n";
+        };
+        std::cout << "\n=== Gradient Components (Ha/bohr) ===\n";
+        std::cout << std::setprecision(6) << std::fixed;
+        print_comp("NUC    ", gc.nu());
+        print_comp("OVERLAP", gc.ov());
+        print_comp("KINETIC", gc.ke());
+        print_comp("POT_B  ", gc.po());
+        print_comp("POT_C  ", gc.pc());
+        if (ecp_int_ptr) print_comp("ECP    ", gc.ecpg());
+        print_comp("DF-J   ", gc.df());
+        print_comp("XC     ", gc.xc());
+        // Check translational invariance: sum of forces should be ~0
+        double fx=0,fy=0,fz=0;
+        for(size_t i=0;i<mol.natom()*3;i+=3){fx+=analytical[i];fy+=analytical[i+1];fz+=analytical[i+2];}
+        std::cout << "  Sum of forces: [" << fx << " " << fy << " " << fz << "] (should be ~0)\n\n";
+      }
+
+      std::cout << "=== Analytical Gradient (Ha/bohr) ===\n";
       std::cout << std::setprecision(8) << std::fixed;
       for (size_t a = 0; a < mol.natom(); a++) {
         double fx=analytical[3*a], fy=analytical[3*a+1], fz=analytical[3*a+2];
@@ -427,10 +452,11 @@ int main(int argc, char* argv[]) {
                   << "  |F| = " << std::sqrt(fx*fx+fy*fy+fz*fz) << "\n";
       }
 
-      // Numerical gradient (validated reference)
+      // Numerical gradient (validated reference) — finds binary relative to CWD
+      const char* exe_path = argv[0];
       auto forces = numerical_gradient(mol, basis_path, aux_basis_path,
           ecp_path, is_pure, functional_id, radial_pts, angular_pts,
-          scf_params, quiet);
+          scf_params, quiet, exe_path);
 
       std::cout << "\n=== Numerical Gradient (Ha/bohr) ===\n";
       std::cout << std::setprecision(8) << std::fixed;
