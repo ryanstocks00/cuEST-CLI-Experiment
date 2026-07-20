@@ -363,13 +363,20 @@ void SCFSolver::run() {
     // (since F = Hcore + 2*J + Vxc and eigenvalues match, D = D_alpha)
     double tr_dh = trace_dot(d_D_, d_Hcore_, N);
     double tr_dj = trace_dot(d_D_, d_J_, N);
-    e_elec_ = 2.0 * (tr_dh + tr_dj) + e_xc_;
+    e_hcore_ = 2.0 * tr_dh;
+    e_j_ = 2.0 * tr_dj;
+    e_k_ = 0.0;
+    e_elec_ = e_hcore_ + e_j_ + e_xc_;
     bool hybrid = (xc_ && xc_->is_hybrid());
     if (hybrid) {
       double k_energy_factor = (xc_ && xc_->is_lrc()) ? 1.0 : xc_->exchange_scale();
       double tr_dk = trace_dot(d_D_, d_K_, N);
-      e_elec_ -= k_energy_factor * tr_dk;
+      e_k_ = -k_energy_factor * tr_dk;
+      e_elec_ += e_k_;
     }
+    tr_ds_ = trace_dot(d_D_, d_S_, N);
+    e_kin_ = 2.0 * trace_dot(d_D_, d_T_, N);
+    e_ne_ = 2.0 * trace_dot(d_D_, d_V_, N);
     e_total_ = e_elec_ + e_nuc_;
     double dE = (iter_ > 1) ? (e_total_ - e_prev) : 0.0;
 
@@ -525,9 +532,15 @@ void SCFSolver::run() {
               << "Iterations: " << iter_ << "\n"
               << std::setprecision(12) << std::fixed
               << "Nuclear repulsion: " << e_nuc_ << " Ha\n"
-              << "Electronic energy: " << e_elec_ << " Ha\n";
-    if (xc_) std::cout << "XC energy: " << e_xc_ << " Ha\n";
-    std::cout << "Total energy:      " << e_total_ << " Ha\n";
+              << "2*Tr[D*Hcore]:     " << e_hcore_ << " Ha\n"
+              << "2*Tr[D*J]:         " << e_j_ << " Ha\n";
+    if (xc_ && xc_->is_hybrid())
+      std::cout << "E_K (exchange):    " << e_k_ << " Ha\n";
+    if (xc_) std::cout << "XC energy:         " << e_xc_ << " Ha\n";
+    std::cout << "Electronic energy: " << e_elec_ << " Ha\n"
+              << "Total energy:      " << e_total_ << " Ha\n"
+              << "Tr[D*S]:           " << tr_ds_ << " (nocc=" << nocc_ << ")\n"
+              << "E_KIN / E_NE:      " << e_kin_ << " / " << e_ne_ << " Ha\n";
 
     if (params_.print_mos && !mo_energies_.empty()) {
       std::cout << "\nOrbital energies (Ha):\n";
@@ -542,6 +555,24 @@ void SCFSolver::run() {
       }
     }
   }
+
+  // Always emit machine-readable components (used by validation / debug scripts)
+  std::cout << std::setprecision(16) << std::fixed
+            << "=== ENERGY_COMPONENTS ===\n"
+            << "E_NUC " << e_nuc_ << "\n"
+            << "E_KIN " << e_kin_ << "\n"
+            << "E_NE " << e_ne_ << "\n"
+            << "E_HCORE " << e_hcore_ << "\n"
+            << "E_J " << e_j_ << "\n"
+            << "E_K " << e_k_ << "\n"
+            << "E_XC " << e_xc_ << "\n"
+            << "E_ELEC " << e_elec_ << "\n"
+            << "E_TOT " << e_total_ << "\n"
+            << "TR_DS " << tr_ds_ << "\n"
+            << "NAO " << nao_ << "\n"
+            << "NOCC " << nocc_ << "\n"
+            << "NELEC " << nelec_ << "\n"
+            << "=== END_ENERGY_COMPONENTS ===\n";
 }
 
 }  // namespace cuest

@@ -33,8 +33,11 @@ inline std::vector<double> compute_normalized_coefficients(
   size_t dfact = 1;
   for (size_t l = 1; l <= L; l++) dfact *= 2 * l - 1;
 
+  // Match NVIDIA cuEST sample helper (utilities.normalize_shell_coefficients):
+  // 1) primitively normalize each coefficient
+  // 2) build contraction factor Q from the *raw* coefficients
+  // 3) scale the primitively-normalized vector by Q^{-1/2}
   std::vector<double> coeff_norm(num_primitives);
-
   for (size_t i = 0; i < num_primitives; i++) {
     coeff_norm[i] = std::sqrt(twoL / (pi32 * static_cast<double>(dfact)) *
                                std::pow(2.0 * exponents[i],
@@ -42,14 +45,13 @@ inline std::vector<double> compute_normalized_coefficients(
                      coefficients[i];
   }
 
-  // Q matrix normalization
   double Q = 0.0;
   for (size_t i = 0; i < num_primitives; i++) {
     for (size_t j = 0; j < num_primitives; j++) {
       Q += std::pow(std::sqrt(4.0 * exponents[i] * exponents[j]) /
                         (exponents[i] + exponents[j]),
                     static_cast<double>(L) + 1.5) *
-            coeff_norm[i] * coeff_norm[j];
+            coefficients[i] * coefficients[j];
     }
   }
   if (Q <= 0.0 || !std::isfinite(Q))

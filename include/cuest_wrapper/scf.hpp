@@ -42,6 +42,12 @@ class SCFSolver {
   double nuclear_repulsion() const { return e_nuc_; }
   double electronic_energy() const { return e_elec_; }
   double xc_energy() const { return e_xc_; }
+  double hcore_energy() const { return e_hcore_; }
+  double kinetic_energy() const { return e_kin_; }
+  double nuclear_attraction_energy() const { return e_ne_; }
+  double coulomb_energy() const { return e_j_; }
+  double exchange_energy() const { return e_k_; }
+  double tr_ds() const { return tr_ds_; }
   const std::vector<double>& orbital_energies() const { return mo_energies_; }
   std::vector<double> mo_coefficients_host() {
     std::vector<double> C(nao_ * nao_);
@@ -82,6 +88,13 @@ class SCFSolver {
   uint64_t nao_, nocc_;
   int nelec_;
   double e_nuc_{0.0}, e_elec_{0.0}, e_xc_{0.0}, e_total_{0.0};
+  // Last-iteration energy components (D = D_alpha convention)
+  double e_hcore_{0.0};  // 2*Tr[D*Hcore]
+  double e_kin_{0.0};    // 2*Tr[D*T]
+  double e_ne_{0.0};     // 2*Tr[D*V]
+  double e_j_{0.0};      // 2*Tr[D*J]
+  double e_k_{0.0};      // exchange energy contribution (0 for pure functionals)
+  double tr_ds_{0.0};
   std::vector<double> mo_energies_;
   int iter_{0};
   bool converged_{false};
