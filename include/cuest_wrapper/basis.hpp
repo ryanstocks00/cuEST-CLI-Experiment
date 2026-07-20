@@ -30,7 +30,10 @@ class BasisBuilder {
   BasisBuilder(CuESTContext& ctx, const Molecule& mol, int is_pure = 1)
       : ctx_(ctx), mol_(mol), is_pure_(is_pure) {}
 
-  // Parse a GBS file and build the AO basis
+  // Build from BSE JSON format (preferred)
+  void build_from_json(const std::string& json_path);
+
+  // Parse a GBS file and build the AO basis (legacy)
   void build_from_gbs(const std::string& gbs_path);
   void build_nvidia(const std::string& gbs_path);
 
@@ -88,10 +91,15 @@ class ECPBuilder {
   ECPBuilder(CuESTContext& ctx, const Molecule& mol)
       : ctx_(ctx), mol_(mol) {}
 
+  // Build from separate ECP file (GBS format, legacy)
   void build_from_file(const std::string& ecp_path);
+
+  // Build from BSE JSON file containing embedded ECP data
+  void build_from_json(const std::string& json_path);
 
   bool has_ecp() const { return has_ecp_; }
   uint64_t num_active_atoms() const { return num_active_ecp_; }
+  uint64_t total_ecp_electrons() const { return total_ecp_electrons_; }
   const std::vector<uint64_t>& ecp_indices() const { return ecp_indices_; }
   const std::vector<cuestECPAtom_t>& ecp_atoms() const { return ecp_atoms_raw_; }
 
@@ -103,6 +111,7 @@ class ECPBuilder {
   const Molecule& mol_;
   bool has_ecp_{false};
   uint64_t num_active_ecp_{0};
+  uint64_t total_ecp_electrons_{0};
 
   std::vector<uint64_t> ecp_indices_;
   std::vector<cuestECPAtom_t> ecp_atoms_raw_;

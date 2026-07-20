@@ -28,6 +28,7 @@ struct SCFParams {
   bool verbose{true};
   bool print_mos{false};
   int print_level{2};
+  uint64_t ecp_electrons{0};     // core electrons removed by ECP
 };
 
 class SCFSolver {

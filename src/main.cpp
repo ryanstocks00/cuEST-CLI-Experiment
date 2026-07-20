@@ -278,7 +278,15 @@ int main(int argc, char* argv[]) {
     // --- Build primary basis ---
     if (!quiet) std::cout << "Building primary basis from: " << basis_path << "\n";
     BasisBuilder basis_builder(ctx, mol, is_pure);
-    basis_builder.build_from_gbs(basis_path);
+
+    // Auto-detect format: .json files use BSE JSON parser, otherwise GBS
+    bool use_json = (basis_path.size() > 5 &&
+                     basis_path.compare(basis_path.size() - 5, 5, ".json") == 0);
+    if (use_json) {
+      basis_builder.build_from_json(basis_path);
+    } else {
+      basis_builder.build_from_gbs(basis_path);
+    }
 
     uint64_t nao = basis_builder.nao();
     if (!quiet) std::cout << "  Basis functions: " << nao << "\n";
@@ -305,26 +313,24 @@ int main(int argc, char* argv[]) {
       }
     }
 
-    // --- Build ECP if specified ---
+    // --- Build ECP from basis JSON (auto-detected) or explicit file ---
     ECPBuilder* ecp_builder_ptr = nullptr;
     ECPIntegrals* ecp_int_ptr = nullptr;
     std::unique_ptr<ECPBuilder> ecp_builder;
     std::unique_ptr<ECPIntegrals> ecp_int;
 
-    if (!ecp_path.empty()) {
-      if (!quiet) std::cout << "Building ECP from: " << ecp_path << "\n";
+    if (!ecp_path.empty() || use_json) {
       ecp_builder = std::make_unique<ECPBuilder>(ctx, mol);
-      ecp_builder->build_from_file(ecp_path);
-
-      if (ecp_builder->has_ecp()) {
-        auto xyz_h = mol.xyz_host();
-        auto ecp_plan = ecp_builder->create_ecp_int_plan(basis_builder.basis(),
-                                                           xyz_h.data());
-        // We need to hold the plan somewhere; for now, rebuild in SCFSolver
-        // (TODO: refactor to pass plan through)
-        ecp_builder_ptr = ecp_builder.get();
-      } else {
-        if (!quiet) std::cout << "  No ECP atoms found in molecule.\n";
+      if (!ecp_path.empty()) {
+        if (!quiet) std::cout << "Building ECP from: " << ecp_path << "\n";
+        ecp_builder->build_from_file(ecp_path);
+      } else if (use_json) {
+        // ECP data is embedded in the JSON basis file
+        ecp_builder->build_from_json(basis_path);
+      }
+      ecp_builder_ptr = ecp_builder.get();
+      if (!ecp_builder->has_ecp() && !quiet) {
+        std::cout << "  No ECP atoms found in molecule.\n";
       }
     }
 
@@ -384,6 +390,7 @@ int main(int argc, char* argv[]) {
     }
 
     // --- Set up ECP integrals ---
+    uint64_t ecp_electrons_removed = 0;
     if (ecp_builder_ptr && ecp_builder_ptr->has_ecp()) {
       auto xyz_h = mol.xyz_host();
       ecp_int = std::make_unique<ECPIntegrals>(
@@ -392,6 +399,11 @@ int main(int argc, char* argv[]) {
           ecp_builder_ptr->ecp_indices().data(),
           ecp_builder_ptr->ecp_atoms().data());
       ecp_int_ptr = ecp_int.get();
+      ecp_electrons_removed = ecp_builder_ptr->total_ecp_electrons();
+      if (!quiet) {
+        std::cout << "  ECP active: " << ecp_electrons_removed
+                  << " core electrons replaced\n";
+      }
     }
 
     // --- Configure SCF ---
@@ -406,6 +418,7 @@ int main(int argc, char* argv[]) {
     scf_params.verbose = verbose;
     scf_params.print_mos = print_mos;
     scf_params.print_level = quiet ? 0 : (verbose ? 2 : 1);
+    scf_params.ecp_electrons = ecp_electrons_removed;
 
     // --- Run SCF ---
     SCFSolver scf(ctx, basis_builder, *dfjk_ptr, &xc,

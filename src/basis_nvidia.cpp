@@ -3,6 +3,7 @@
  * @brief BasisBuilder using NVIDIA's proven formAOShells helper.
  */
 #include "cuest_wrapper/basis.hpp"
+#include "cuest_wrapper/basis_json.hpp"
 #include <cuda_runtime.h>
 #include <cuest.h>
 #include <cstdint>
@@ -115,6 +116,56 @@ void BasisBuilder::build_nvidia(const std::string& gbs_path) {
   free(nvidia_shells);
   free(shellData);
   free_xyz(xyz);
+}
+
+void BasisBuilder::build_from_json(const std::string& json_path) {
+  BSEJsonReader reader(json_path);
+
+  // Build shells from JSON for each atom in the molecule
+  uint64_t natom = mol_.natom();
+  std::vector<uint64_t> shells_per_atom(natom);
+  std::vector<cuestAOShell_t> all_shells;
+
+  for (size_t a = 0; a < natom; a++) {
+    int Z = mol_.atom(a).atomic_number;
+    auto json_shells = reader.get_shells(Z);
+    shells_per_atom[a] = json_shells.size();
+
+    for (auto& js : json_shells) {
+      // Each coefficient set in the JSON becomes a separate contracted shell
+      for (auto& coeffs : js.all_coefficients) {
+        auto norm = compute_normalized_coefficients(js.L, js.nprim,
+                                                     js.exponents.data(),
+                                                     coeffs.data());
+        cuestAOShell_t sh;
+        CUEST_CHECK(cuestAOShellCreate(
+            static_cast<cuestHandle_t>(ctx_), is_pure_, js.L, js.nprim,
+            js.exponents.data(), norm.data(),
+            AOShellParams{}, &sh));
+        all_shells.push_back(sh);
+        AOShellHandle h;
+        *h.ptr() = sh;
+        shell_handles_.push_back(std::move(h));
+      }
+    }
+  }
+
+  // Create AO basis
+  cuestWorkspaceDescriptor_t pers_desc{}, temp_desc{};
+  AOBasisParams ao_params;
+  CUEST_CHECK(cuestAOBasisCreateWorkspaceQuery(
+      static_cast<cuestHandle_t>(ctx_), natom, shells_per_atom.data(),
+      all_shells.data(), ao_params,
+      &pers_desc, &temp_desc, basis_.ptr()));
+
+  persistent_ws_ = Workspace(pers_desc);
+  Workspace temp_ws(temp_desc);
+  CUEST_CHECK(cuestAOBasisCreate(
+      static_cast<cuestHandle_t>(ctx_), natom, shells_per_atom.data(),
+      all_shells.data(), ao_params,
+      persistent_ws_.ptr(), temp_ws.ptr(), basis_.ptr()));
+
+  nao_ = ctx_.query_nao(basis_.get());
 }
 
 void BasisBuilder::build_from_gbs(const std::string& gbs_path) {

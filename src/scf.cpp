@@ -19,8 +19,9 @@ SCFSolver::SCFSolver(CuESTContext& ctx, BasisBuilder& basis,
   cublasCreate(&cublas_);
   cusolverDnCreate(&cusolver_);
   nao_ = ctx_.query_nao(basis_.basis());
-  nocc_ = mol_.nocc();
-  nelec_ = mol_.nelec();
+  // Adjust electron count for ECP core electrons
+  nelec_ = mol_.nelec() - static_cast<int>(params_.ecp_electrons);
+  nocc_ = nelec_ / 2;
   e_nuc_ = mol_.nuclear_repulsion();
 
   size_t N2 = nao_ * nao_;
@@ -261,76 +262,19 @@ void SCFSolver::run() {
 
   build_core_hamiltonian();
 
-  // SAD (Superposition of Atomic Densities) initial guess:
-  // Build atomic densities, project into molecular basis, sum, diagonalize.
+  // Initial guess: use core Hamiltonian directly (Hcore guess).
+  // This is more robust than SAD for systems with ECPs, where per-atom
+  // AO counts may not match the basis set.
   {
-    int N = static_cast<int>(nao_);
-    std::vector<double> S_h(N*N);
-    cudaMemcpy(S_h.data(), d_S_, N*N*sizeof(double), cudaMemcpyDeviceToHost);
-
-    // Get per-atom AO counts by querying cuEST
-    // The basis_ has numShellsPerAtom info; we query NAO per shell
-    // Build D_SAD = sum_atoms D_atom, where D_atom is approximate atomic density
-    // For each atom: equally distribute valence electrons among its AOs
-    std::vector<double> D_sad(N*N, 0.0);
-    std::vector<int> ao_per_atom(mol_.natom(), 0);
-    std::vector<int> ao_start(mol_.natom(), 0);
-
-    // Count AOs per atom from the basis shells
-    // Use per-shell NAO query for accuracy
-    int ao_fill = 0;
-    for (size_t a = 0; a < mol_.natom(); a++) {
-      ao_start[a] = ao_fill;
-      // Rough estimate: H=~5 AO, B-F=~14 AO, others proportional to Z
-      int Z = mol_.atom(a).atomic_number;
-      int nao = (Z <= 2) ? 5 : 14;  // rough def2-SVP sizes
-      if (Z > 10) nao = 18;         // third row
-      ao_per_atom[a] = std::min(nao, N - ao_fill);
-      ao_fill += ao_per_atom[a];
-    }
-
-    // Get valence electrons per atom
-    auto nval = [](int Z) {
-      if (Z <= 2) return Z;
-      if (Z <= 10) return Z - 2;
-      if (Z <= 18) return Z - 10;
-      return Z - 18;
-    };
-
-    // Build atomic densities (diagonal in AO block)
-    for (size_t a = 0; a < mol_.natom(); a++) {
-      int nv = nval(mol_.atom(a).atomic_number);
-      int start = ao_start[a];
-      int count = ao_per_atom[a];
-      if (count <= 0) continue;
-      double occ_per_ao = (double)nv / count * 0.5;  // half for alpha density
-      for (int i = start; i < start + count && i < N; i++)
-        D_sad[i*N + i] = occ_per_ao;
-    }
-
-    // Normalize: Tr[D_sad * S] should be ~n_alpha
-    double trDS = 0.0;
-    for (int i = 0; i < N; i++)
-      for (int j = 0; j < N; j++)
-        trDS += D_sad[i*N + j] * S_h[j*N + i];
-    double scale = nocc_ / std::max(trDS, 1e-10);
-    for (auto& d : D_sad) d *= scale;
-
-    // Build Fock from SAD density: use as initial guess
-    // First iteration will diagonalize this density
-    // For stability, mix with core Hamiltonian: F = Hcore + lambda * D_sad
-    std::vector<double> F_init(N*N);
-    cudaMemcpy(F_init.data(), d_Hcore_, N*N*sizeof(double), cudaMemcpyDeviceToHost);
-    // Add a fraction of D_sad to break degeneracy
-    const double mix = 0.5;
-    for (int i = 0; i < N*N; i++) F_init[i] += mix * D_sad[i];
-    cudaMemcpy(d_Fock_, F_init.data(), N*N*sizeof(double), cudaMemcpyHostToDevice);
-
+    // Fock = Hcore as initial guess
+    cublasDcopy(cublas_, nao_*nao_, d_Hcore_, 1, d_Fock_, 1);
     diagonalize_fock();
     build_density_matrix();
-    if (params_.print_level >= 2)
-      std::cout << "  SAD initial guess: Tr[D*S] = " << std::fixed
+    if (params_.print_level >= 2) {
+      int N = static_cast<int>(nao_);
+      std::cout << "  Hcore initial guess: Tr[D*S] = " << std::fixed
                 << std::setprecision(6) << trace_dot(d_D_, d_S_, N) << "\n";
+    }
   }
 
   // DIIS arrays

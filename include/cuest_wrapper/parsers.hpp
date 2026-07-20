@@ -252,6 +252,12 @@ inline ECPShellSet parse_ecp_for_element(const std::string& filepath,
 
     if (nskip > 0) { nskip--; continue; }
 
+    // Check for end-of-block separator
+    if (trimmed.find("****") != std::string::npos) {
+      if (in_target_block) break;
+      continue;
+    }
+
     int nwords = detail::count_words(trimmed);
 
     // ECP header (3 words): element, max_L, n_elec

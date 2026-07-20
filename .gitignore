@@ -26,3 +26,8 @@ test_wrapper*
 data/ch2i2.xyz
 data/def2-svpd.gbs
 data/test_*.xyz
+*.pyc
+__pycache__/
+# JSON basis files are tracked in data/
+# test result JSON files are not
+test/validation*.json

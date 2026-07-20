@@ -33,34 +33,29 @@ RESULTS_FILE = PROJ_DIR / "test" / "validation_results.json"
 # Each entry: (molecule_xyz, basis, aux_basis, ecp_file or None, label)
 BASIS_SETS = {
     "def2SVP": {
-        "basis": "def2-svp.gbs",
-        "aux": "def2-universal-jkfit.gbs",
-        "ecp": None,
+        "basis": "def2-svp.json",
+        "aux": "def2-universal-jkfit.gbs",  # aux still GBS for now
+        "ecp": None,  # ECP auto-detected from JSON
     },
     "def2TZVP": {
-        "basis": "def2-tzvp.gbs",
+        "basis": "def2-tzvp.json",
         "aux": "def2-universal-jkfit.gbs",
         "ecp": None,
     },
     "def2SVPD": {
-        "basis": "def2-svpd.gbs",
+        "basis": "def2-svpd.json",
         "aux": "def2-universal-jkfit.gbs",
         "ecp": None,
     },
     "cc-pVDZ": {
-        "basis": "cc-pvdz.gbs",
+        "basis": "cc-pvdz.json",
         "aux": "def2-universal-jkfit.gbs",
         "ecp": None,
     },
     "cc-pVTZ": {
-        "basis": "cc-pvtz.gbs",
+        "basis": "cc-pvtz.json",
         "aux": "def2-universal-jkfit.gbs",
         "ecp": None,
-    },
-    "def2SVP-ECP": {
-        "basis": "def2-svp.gbs",
-        "aux": "def2-universal-jkfit.gbs",
-        "ecp": "def2-svp-ecp.gbs",
     },
 }
 
@@ -92,13 +87,18 @@ PYSCF_XC_MAP = {
     "WB97X": "wb97x",
 }
 
-# PySCF basis name mapping
+# PySCF basis name mapping (works with both .gbs and .json)
 PYSCF_BASIS_MAP = {
     "def2-svp.gbs": "def2SVP",
     "def2-tzvp.gbs": "def2TZVP",
     "def2-svpd.gbs": "def2SVPD",
     "cc-pvdz.gbs": "cc-pVDZ",
     "cc-pvtz.gbs": "cc-pVTZ",
+    "def2-svp.json": "def2SVP",
+    "def2-tzvp.json": "def2TZVP",
+    "def2-svpd.json": "def2SVPD",
+    "cc-pvdz.json": "cc-pVDZ",
+    "cc-pvtz.json": "cc-pVTZ",
 }
 
 
@@ -139,10 +139,6 @@ def build_test_matrix(quick=False):
                 funcs = ["PBE"]
 
             for func in funcs:
-                # Skip ECP basis for molecules without heavy atoms
-                if bs_key == "def2SVP-ECP":
-                    continue  # handled separately below
-
                 # Skip exotic combos in quick mode
                 if quick and bs_key not in ("def2SVP",):
                     continue
@@ -158,18 +154,17 @@ def build_test_matrix(quick=False):
                     "has_ecp": False,
                 })
 
-    # Add ECP tests (heavy elements)
+    # Add heavy-element tests (ECP auto-detected from JSON)
     ecp_tests = [
-        ("v_Br2_PBE_def2SVP.xyz", "Br2", "def2-svp.gbs", "def2-svp-ecp.gbs"),
-        ("v_I2_PBE_def2SVP.xyz", "I2", "def2-svp.gbs", "def2-svp-ecp.gbs"),
-        ("ch2i2.xyz", "CH2I2", "def2-svp.gbs", "def2-svp-ecp.gbs"),
+        ("v_Br2_PBE_def2SVP.xyz", "Br2"),
+        ("v_I2_PBE_def2SVP.xyz", "I2"),
+        ("ch2i2.xyz", "CH2I2"),
     ]
-    for xyz_file, label, basis_name, ecp_name in ecp_tests:
+    for xyz_file, label in ecp_tests:
         xyz_path = DATA_DIR / xyz_file
-        basis_path = DATA_DIR / basis_name
+        basis_path = DATA_DIR / "def2-svp.json"
         aux_path = DATA_DIR / "def2-universal-jkfit.gbs"
-        ecp_path = DATA_DIR / ecp_name
-        if not all(p.exists() for p in [xyz_path, basis_path, aux_path, ecp_path]):
+        if not all(p.exists() for p in [xyz_path, basis_path, aux_path]):
             continue
         funcs = ["PBE"] if quick else ["PBE", "B3LYP", "PBE0"]
         for func in funcs:
@@ -178,7 +173,7 @@ def build_test_matrix(quick=False):
                 "xyz": str(xyz_path),
                 "basis": str(basis_path),
                 "aux_basis": str(aux_path),
-                "ecp": str(ecp_path),
+                "ecp": None,  # auto-detected from JSON
                 "functional": func,
                 "basis_label": "def2SVP",
                 "has_ecp": True,
@@ -204,7 +199,7 @@ def run_cuest(config, timeout=300):
         "--energy-conv", "1e-8",
         "--quiet",
     ]
-    if config.get("ecp"):
+    if config.get("ecp"):  # explicit ECP file override (legacy)
         cmd.extend(["--ecp", config["ecp"]])
 
     start = time.time()
@@ -294,14 +289,11 @@ def run_pyscf(config):
     basis_name = Path(config["basis"]).name
     pyscf_basis = PYSCF_BASIS_MAP.get(basis_name, "def2SVP")
 
-    # ECP
+    # ECP: PySCF auto-detects ECP from def2 basis for heavy elements
     has_ecp = config.get("has_ecp", False)
 
     try:
-        if has_ecp:
-            mol = gto.M(atom=atoms, basis=pyscf_basis, ecp=pyscf_basis, verbose=0)
-        else:
-            mol = gto.M(atom=atoms, basis=pyscf_basis, verbose=0)
+        mol = gto.M(atom=atoms, basis=pyscf_basis, verbose=0)
     except Exception as e:
         return {"ok": False, "error": f"PySCF mol build: {e}"}
 
