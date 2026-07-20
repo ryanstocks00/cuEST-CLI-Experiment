@@ -1,0 +1,136 @@
+{
+  "generated": "2026-07-20T04:05:58.038712+00:00",
+  "pyscf_basis_source": "bse_json_direct",
+  "results": [
+    {
+      "molecule": "H2O",
+      "functional": "PBE",
+      "basis_label": "def2SVP",
+      "ok": true,
+      "energy_ha": -76.27196334702302,
+      "homo_ha": -0.22850562623000728,
+      "lumo_ha": 0.030021181682965043,
+      "wall_s": 2.7431259155273438
+    },
+    {
+      "molecule": "NH3",
+      "functional": "PBE",
+      "basis_label": "def2SVP",
+      "ok": true,
+      "energy_ha": -56.43252695041428,
+      "homo_ha": -0.1976606041364202,
+      "lumo_ha": 0.03703637996686107,
+      "wall_s": 3.1220862865448
+    },
+    {
+      "molecule": "H2",
+      "functional": "PBE",
+      "basis_label": "def2SVP",
+      "ok": true,
+      "energy_ha": -1.1600534857580493,
+      "homo_ha": -0.3767292407883906,
+      "lumo_ha": 0.05721495290442218,
+      "wall_s": 1.085033893585205
+    },
+    {
+      "molecule": "HF",
+      "functional": "PBE",
+      "basis_label": "def2SVP",
+      "ok": true,
+      "energy_ha": -100.2538501583665,
+      "homo_ha": -0.3095574374383006,
+      "lumo_ha": 0.0298291918259174,
+      "wall_s": 1.6588687896728516
+    },
+    {
+      "molecule": "N2",
+      "functional": "PBE",
+      "basis_label": "def2SVP",
+      "ok": true,
+      "energy_ha": -109.32080205961371,
+      "homo_ha": -0.3664998798919358,
+      "lumo_ha": -0.061723727287466876,
+      "wall_s": 1.6898443698883057
+    },
+    {
+      "molecule": "CO2",
+      "functional": "PBE",
+      "basis_label": "def2SVP",
+      "ok": true,
+      "energy_ha": -188.25568770167627,
+      "homo_ha": -0.3226764668711147,
+      "lumo_ha": 0.001091065543001447,
+      "wall_s": 4.304170608520508
+    },
+    {
+      "molecule": "CH4",
+      "functional": "PBE",
+      "basis_label": "def2SVP",
+      "ok": true,
+      "energy_ha": -40.41443887639905,
+      "homo_ha": -0.342659812198756,
+      "lumo_ha": 0.05640122696162905,
+      "wall_s": 3.6871490478515625
+    },
+    {
+      "molecule": "C2H4",
+      "functional": "PBE",
+      "basis_label": "def2SVP",
+      "ok": true,
+      "energy_ha": -78.4107931951014,
+      "homo_ha": -0.24164582725926123,
+      "lumo_ha": -0.0280969102413885,
+      "wall_s": 5.187045335769653
+    },
+    {
+      "molecule": "BH3",
+      "functional": "PBE",
+      "basis_label": "def2SVP",
+      "ok": true,
+      "energy_ha": -26.519262153891553,
+      "homo_ha": -0.3086562462429453,
+      "lumo_ha": -0.10933793069762804,
+      "wall_s": 2.6592745780944824
+    },
+    {
+      "molecule": "SO2",
+      "functional": "PBE",
+      "basis_label": "def2SVP",
+      "ok": true,
+      "energy_ha": -547.9935659141855,
+      "homo_ha": -0.25524039759655254,
+      "lumo_ha": -0.11875839905216293,
+      "wall_s": 4.102528810501099
+    },
+    {
+      "molecule": "Br2",
+      "functional": "PBE",
+      "basis_label": "def2SVP",
+      "ok": true,
+      "energy_ha": -5146.903638619041,
+      "homo_ha": -0.24461580224503146,
+      "lumo_ha": -0.1628949475587092,
+      "wall_s": 4.3470494747161865
+    },
+    {
+      "molecule": "I2",
+      "functional": "PBE",
+      "basis_label": "def2SVP",
+      "ok": true,
+      "energy_ha": -595.3876744112648,
+      "homo_ha": -0.22639820149084822,
+      "lumo_ha": -0.16373387405230808,
+      "wall_s": 3.7029762268066406
+    },
+    {
+      "molecule": "CH2I2",
+      "functional": "PBE",
+      "basis_label": "def2SVP",
+      "ok": true,
+      "energy_ha": -634.4777837456659,
+      "homo_ha": -0.20646538564816247,
+      "lumo_ha": -0.1323975670720692,
+      "wall_s": 7.859457969665527
+    }
+  ]
+}
