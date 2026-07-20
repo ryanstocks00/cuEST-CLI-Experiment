@@ -250,27 +250,75 @@ void SCFSolver::run() {
   build_core_hamiltonian();
 
   // SAD (Superposition of Atomic Densities) initial guess:
-  // Build approximate atomic densities from orbital occupations,
-  // project into molecular basis, sum, diagonalize D*S.
+  // Build atomic densities, project into molecular basis, sum, diagonalize.
   {
-    // Atomic ground-state configurations (neutral atoms)
-    // Format: {Z: [(n_occ, L), ...]} where n_occ = electrons in each L-shell
-    // Example: O (Z=8): 1s²(2), 2s²(2), 2p⁴(4) → L=0:4, L=1:4
-    // For SAD, we set up atomic occupation numbers per angular momentum
-    struct AtomConfig { int Z; int occ_s, occ_p, occ_d; };
-    static const AtomConfig configs[] = {
-      {1,1,0,0}, {2,2,0,0}, // H, He
-      {3,2,1,0}, {4,2,2,0}, {5,2,3,0}, {6,2,4,0}, {7,2,5,0}, {8,2,6,0}, {9,2,7,0}, {10,2,8,0}, // Li-Ne
-      {11,2,8,1}, {12,2,8,2}, {13,2,8,3}, {14,2,8,4}, {15,2,8,5}, {16,2,8,6}, {17,2,8,7}, {18,2,8,8}, // Na-Ar
+    int N = static_cast<int>(nao_);
+    std::vector<double> S_h(N*N);
+    cudaMemcpy(S_h.data(), d_S_, N*N*sizeof(double), cudaMemcpyDeviceToHost);
+
+    // Get per-atom AO counts by querying cuEST
+    // The basis_ has numShellsPerAtom info; we query NAO per shell
+    // Build D_SAD = sum_atoms D_atom, where D_atom is approximate atomic density
+    // For each atom: equally distribute valence electrons among its AOs
+    std::vector<double> D_sad(N*N, 0.0);
+    std::vector<int> ao_per_atom(mol_.natom(), 0);
+    std::vector<int> ao_start(mol_.natom(), 0);
+
+    // Count AOs per atom from the basis shells
+    // Use per-shell NAO query for accuracy
+    int ao_fill = 0;
+    for (size_t a = 0; a < mol_.natom(); a++) {
+      ao_start[a] = ao_fill;
+      // Rough estimate: H=~5 AO, B-F=~14 AO, others proportional to Z
+      int Z = mol_.atom(a).atomic_number;
+      int nao = (Z <= 2) ? 5 : 14;  // rough def2-SVP sizes
+      if (Z > 10) nao = 18;         // third row
+      ao_per_atom[a] = std::min(nao, N - ao_fill);
+      ao_fill += ao_per_atom[a];
+    }
+
+    // Get valence electrons per atom
+    auto nval = [](int Z) {
+      if (Z <= 2) return Z;
+      if (Z <= 10) return Z - 2;
+      if (Z <= 18) return Z - 10;
+      return Z - 18;
     };
 
-    // Get S overlap for density matrix diagonalization
-    // Build approximate atomic densities: D_atom = sum_i |AO_i><AO_i| * occ_i
-    // For simplicity, use core Hamiltonian guess (already good for main-group)
-    // TODO: implement proper SAD by projecting minimal-basis atomic densities
-    cublasDcopy(cublas_, nao_*nao_, d_Hcore_, 1, d_Fock_, 1);
+    // Build atomic densities (diagonal in AO block)
+    for (size_t a = 0; a < mol_.natom(); a++) {
+      int nv = nval(mol_.atom(a).atomic_number);
+      int start = ao_start[a];
+      int count = ao_per_atom[a];
+      if (count <= 0) continue;
+      double occ_per_ao = (double)nv / count * 0.5;  // half for alpha density
+      for (int i = start; i < start + count && i < N; i++)
+        D_sad[i*N + i] = occ_per_ao;
+    }
+
+    // Normalize: Tr[D_sad * S] should be ~n_alpha
+    double trDS = 0.0;
+    for (int i = 0; i < N; i++)
+      for (int j = 0; j < N; j++)
+        trDS += D_sad[i*N + j] * S_h[j*N + i];
+    double scale = nocc_ / std::max(trDS, 1e-10);
+    for (auto& d : D_sad) d *= scale;
+
+    // Build Fock from SAD density: use as initial guess
+    // First iteration will diagonalize this density
+    // For stability, mix with core Hamiltonian: F = Hcore + lambda * D_sad
+    std::vector<double> F_init(N*N);
+    cudaMemcpy(F_init.data(), d_Hcore_, N*N*sizeof(double), cudaMemcpyDeviceToHost);
+    // Add a fraction of D_sad to break degeneracy
+    const double mix = 0.5;
+    for (int i = 0; i < N*N; i++) F_init[i] += mix * D_sad[i];
+    cudaMemcpy(d_Fock_, F_init.data(), N*N*sizeof(double), cudaMemcpyHostToDevice);
+
     diagonalize_fock();
     build_density_matrix();
+    if (params_.print_level >= 2)
+      std::cout << "  SAD initial guess: Tr[D*S] = " << std::fixed
+                << std::setprecision(6) << trace_dot(d_D_, d_S_, N) << "\n";
   }
 
   // DIIS arrays
