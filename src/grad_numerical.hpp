@@ -46,8 +46,8 @@ static const char* functional_id_to_name(int id) {
 // Uses the SAME binary, basis, and settings as the analytical gradient.
 inline std::vector<double> numerical_gradient(
     const Molecule& mol, const std::string& basis_path,
-    const std::string& aux_path, const std::string& ecp_path,
-    int is_pure, int func_id, int rad_pts, int ang_pts,
+    const std::string& aux_path,
+    int func_id, int rad_pts, int ang_pts,
     struct SCFParams params, bool quiet,
     const std::string& binary_path = "build/cuest_dft")
 {
@@ -95,12 +95,6 @@ inline std::vector<double> numerical_gradient(
             << " --max-iter " << params.max_iter
             << " --conv-thresh " << params.conv_thresh
             << " --quiet";
-        if (!ecp_path.empty()) {
-          cmd << " --ecp " << quote(ecp_path);
-        }
-        if (!is_pure) {
-          cmd << " --no-pure";
-        }
 
         FILE* pipe = popen(cmd.str().c_str(), "r");
         if (!pipe) { remove(tmp); continue; }

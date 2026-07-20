@@ -44,7 +44,6 @@ add_executable(cuest_dft
 add_library(cuest_wrapper INTERFACE)
 target_include_directories(cuest_wrapper INTERFACE
   ${CMAKE_SOURCE_DIR}/include
-  ${CMAKE_SOURCE_DIR}/temp_samples/cuEST/c_examples/common
   ${CUEST_INCLUDE_DIR}
 )
 target_compile_definitions(cuest_wrapper INTERFACE

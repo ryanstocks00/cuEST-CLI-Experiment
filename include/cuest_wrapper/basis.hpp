@@ -30,12 +30,8 @@ class BasisBuilder {
   BasisBuilder(CuESTContext& ctx, const Molecule& mol, int is_pure = 1)
       : ctx_(ctx), mol_(mol), is_pure_(is_pure) {}
 
-  // Build from BSE JSON format (preferred)
+  // Build from BSE JSON format
   void build_from_json(const std::string& json_path);
-
-  // Parse a GBS file and build the AO basis (legacy)
-  void build_from_gbs(const std::string& gbs_path);
-  void build_nvidia(const std::string& gbs_path);
 
   // Accessors
   uint64_t nao() const { return nao_; }
@@ -68,7 +64,7 @@ class AuxBasis {
   AuxBasis(CuESTContext& ctx, const Molecule& mol, int is_pure = 1)
       : ctx_(ctx), mol_(mol), is_pure_(is_pure) {}
 
-  void build_from_gbs(const std::string& gbs_path);
+  void build_from_json(const std::string& json_path);
   ~AuxBasis();
   cuestAOBasis_t basis() const { return basis_.get(); }
   const AOBasisHandle& handle() const { return basis_; }
@@ -91,10 +87,7 @@ class ECPBuilder {
   ECPBuilder(CuESTContext& ctx, const Molecule& mol)
       : ctx_(ctx), mol_(mol) {}
 
-  // Build from separate ECP file (GBS format, legacy)
-  void build_from_file(const std::string& ecp_path);
-
-  // Build from BSE JSON file containing embedded ECP data
+  // Build ECP from BSE JSON file (embedded ecp_potentials)
   void build_from_json(const std::string& json_path);
 
   bool has_ecp() const { return has_ecp_; }

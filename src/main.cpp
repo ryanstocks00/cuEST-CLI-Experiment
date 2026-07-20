@@ -2,36 +2,10 @@
  * @file main.cpp
  * @brief CLI entry point for cuEST-based DFT calculations.
  *
- * Usage: cuest_dft --xyz <file> --basis <gbs_file> [options]
+ * Usage: cuest_dft --xyz <file> --basis <json_file> [options]
  *
- * Full list of options:
- *   Required:
- *     --xyz <path>            Input geometry in XYZ format
- *     --basis <path>          Primary basis set in GBS format
- *
- *   Optional:
- *     --aux-basis <path>      Auxiliary/DF basis set in GBS format
- *     --ecp <path>            ECP definitions (GBS format with ECP data)
- *     --functional <name>     XC functional: PBE (default), B3LYP, PBE0,
- *                             CAM-B3LYP, wB97X-V, wB97M-V, HSE06, M06,
- *                             M06-2X, LC-wPBE, LC-wPBEh, wB97X
- *     --radial-pts <n>        Radial grid points (default: 75)
- *     --angular-pts <n>       Angular grid points (default: 302)
- *     --charge <int>          Total molecular charge (default: 0)
- *     --multiplicity <int>    Spin multiplicity (default: 1)
- *     --max-iter <n>          Maximum SCF iterations (default: 150)
- *     --conv-thresh <val>     RMS density convergence (default: 1e-8)
- *     --energy-conv <val>     Energy convergence (default: 1e-8)
- *     --diis-start <n>        Iteration to start DIIS (default: 1)
- *     --diis-space <n>        DIIS subspace size (default: 10)
- *     --damping <val>         Density damping factor (default: 0.0)
- *     --level-shift <val>     Level shifting parameter (default: 0.0)
- *     --no-df                 Disable density fitting (use exact integrals)
- *     --no-pure               Use Cartesian (not spherical) functions
- *     --quiet                 Minimal output
- *     --verbose               Maximum output
- *     --print-mos             Print MO energies at end
- *     --help                  Show this help
+ * Basis sets must be in BSE (Basis Set Exchange) JSON format.
+ * ECP data is auto-detected from the JSON basis file for heavy elements.
  */
 
 #include <cmath>
@@ -54,21 +28,10 @@
 #include "cuest_wrapper/scf.hpp"
 #include "cuest_wrapper/shell_norm.hpp"
 
-// NVIDIA proven helpers (must be included in dependency order)
-extern "C" {
-#include "helper_status.h"
-#include "helper_workspaces.h"
-#include "helper_gbs_parser.h"
-#include "helper_xyz_parser.h"
-#include "helper_shell_normalization.h"
-#include "helper_ecp_parser.h"
-#include "helper_ao_shells.h"
-}
-
 using namespace cuest;
 
 // ---------------------------------------------------------------------------
-// Functional name → ID mapping
+// Functional name -> ID mapping
 // ---------------------------------------------------------------------------
 struct FunctionalInfo {
   const char* name;
@@ -76,19 +39,19 @@ struct FunctionalInfo {
 };
 
 static const FunctionalInfo kFunctionals[] = {
-    {"PBE", XCBuilder::XC_PBE},
-    {"B3LYP", XCBuilder::XC_B3LYP},
-    {"B3LYP5", XCBuilder::XC_B3LYP5},
-    {"PBE0", XCBuilder::XC_PBE0},
+    {"PBE",       XCBuilder::XC_PBE},
+    {"B3LYP",     XCBuilder::XC_B3LYP},
+    {"B3LYP5",    XCBuilder::XC_B3LYP5},
+    {"PBE0",      XCBuilder::XC_PBE0},
     {"CAM-B3LYP", XCBuilder::XC_CAM_B3LYP},
-    {"WB97X-V", XCBuilder::XC_WB97X_V},
-    {"WB97M-V", XCBuilder::XC_WB97M_V},
-    {"HSE06", XCBuilder::XC_HSE06},
-    {"M06", XCBuilder::XC_M06},
-    {"M06-2X", XCBuilder::XC_M062X},
-    {"LC-WPBE", XCBuilder::XC_LC_WPBE},
-    {"LC-WPBEH", XCBuilder::XC_LC_WPBEH},
-    {"WB97X", XCBuilder::XC_WB97X},
+    {"WB97X-V",   XCBuilder::XC_WB97X_V},
+    {"WB97M-V",   XCBuilder::XC_WB97M_V},
+    {"HSE06",     XCBuilder::XC_HSE06},
+    {"M06",       XCBuilder::XC_M06},
+    {"M06-2X",    XCBuilder::XC_M062X},
+    {"LC-WPBE",   XCBuilder::XC_LC_WPBE},
+    {"LC-WPBEH",  XCBuilder::XC_LC_WPBEH},
+    {"WB97X",     XCBuilder::XC_WB97X},
 };
 
 // ---------------------------------------------------------------------------
@@ -97,13 +60,12 @@ static const FunctionalInfo kFunctionals[] = {
 static void print_help(const char* prog) {
   std::cout
       << "cuEST DFT — GPU-accelerated density functional theory\n"
-      << "Usage: " << prog << " --xyz <file> --basis <gbs_file> [options]\n\n"
+      << "Usage: " << prog << " --xyz <file> --basis <json_file> [options]\n\n"
       << "Required arguments:\n"
       << "  --xyz <path>             Input geometry in XYZ format\n"
-      << "  --basis <path>           Primary basis set in Gaussian94 format\n\n"
+      << "  --basis <path>           Basis set in BSE JSON format\n\n"
       << "Optional arguments:\n"
-      << "  --aux-basis <path>       Auxiliary/DF (RI-J) basis set\n"
-      << "  --ecp <path>             Effective core potential file\n"
+      << "  --aux-basis <path>       Auxiliary/DF (RI-J) basis set (JSON or GBS)\n"
       << "  --functional <name>      XC functional (default: PBE)\n"
       << "  --radial-pts <n>         Radial grid points (default: 75)\n"
       << "  --angular-pts <n>        Angular Lebedev points (default: 302)\n"
@@ -115,11 +77,9 @@ static void print_help(const char* prog) {
       << "  --energy-conv <val>      Energy change convergence (default: 1e-8)\n"
       << "  --diis-start <n>         Iteration to enable DIIS (default: 1)\n"
       << "  --diis-space <n>         DIIS subspace dimension (default: 10)\n"
-      << "  --damping <val>          Density damping factor (default: 0.0)\n"
-      << "  --level-shift <val>      Level shifting (default: 0.0)\n\n"
+      << "  --damping <val>          Density damping factor (default: 0.0)\n\n"
       << "Other options:\n"
       << "  --no-df                  Disable density fitting\n"
-      << "  --no-pure                Use Cartesian (not spherical) functions\n"
       << "  --quiet                  Minimal output\n"
       << "  --verbose                Verbose output\n"
       << "  --print-mos              Print final MO energies\n"
@@ -128,9 +88,9 @@ static void print_help(const char* prog) {
       << "Available functionals:\n"
       << "  PBE B3LYP B3LYP5 PBE0 CAM-B3LYP WB97X-V WB97M-V\n"
       << "  HSE06 M06 M06-2X LC-WPBE LC-WPBEH WB97X\n\n"
-      << "Input files can be obtained from the EMSL Basis Set Exchange:\n"
-      << "  https://www.basissetexchange.org/\n"
-      << "  (Use 'Gaussian94' or 'Psi4' format; uncontract SPDF if needed)\n"
+      << "Basis sets in BSE JSON format can be downloaded from:\n"
+      << "  https://www.basissetexchange.org/api/basis/<name>/format/json/\n"
+      << "ECP data for heavy elements is auto-detected from the JSON file.\n"
       << std::endl;
 }
 
@@ -139,7 +99,7 @@ static void print_help(const char* prog) {
 // ---------------------------------------------------------------------------
 int main(int argc, char* argv[]) {
   // --- Parse CLI arguments ---
-  std::string xyz_path, basis_path, aux_basis_path, ecp_path;
+  std::string xyz_path, basis_path, aux_basis_path;
   std::string functional_name = "PBE";
   int radial_pts = 75;
   int angular_pts = 302;
@@ -151,9 +111,7 @@ int main(int argc, char* argv[]) {
   int diis_start = 1;
   int diis_space = 10;
   double damping = 0.0;
-  double level_shift = 0.0;
   bool use_df = true;
-  int is_pure = 1;
   bool verbose = true;
   bool print_mos = false;
   bool gradient = false;
@@ -171,8 +129,6 @@ int main(int argc, char* argv[]) {
       basis_path = argv[++i];
     } else if (arg == "--aux-basis" && i + 1 < argc) {
       aux_basis_path = argv[++i];
-    } else if (arg == "--ecp" && i + 1 < argc) {
-      ecp_path = argv[++i];
     } else if (arg == "--functional" && i + 1 < argc) {
       functional_name = argv[++i];
     } else if (arg == "--radial-pts" && i + 1 < argc) {
@@ -195,12 +151,8 @@ int main(int argc, char* argv[]) {
       diis_space = std::stoi(argv[++i]);
     } else if (arg == "--damping" && i + 1 < argc) {
       damping = std::stod(argv[++i]);
-    } else if (arg == "--level-shift" && i + 1 < argc) {
-      level_shift = std::stod(argv[++i]);
     } else if (arg == "--no-df") {
       use_df = false;
-    } else if (arg == "--no-pure") {
-      is_pure = 0;
     } else if (arg == "--quiet") {
       quiet = true;
       verbose = false;
@@ -251,8 +203,6 @@ int main(int argc, char* argv[]) {
     auto xyz_data = parse_xyz(xyz_path);
 
     Molecule mol;
-    // parse_xyz already returns coordinates in bohr; add_atom needs raw bohr values.
-    // Use add_atom_bohr to avoid double conversion.
     for (size_t i = 0; i < xyz_data.n_atoms; i++) {
       mol.add_atom_bohr(xyz_data.symbols[i],
                         xyz_data.xyz[3 * i],
@@ -261,7 +211,6 @@ int main(int argc, char* argv[]) {
     }
     mol.set_multiplicity(multiplicity);
 
-    // Adjust for charge
     if (charge != 0) {
       std::cerr << "Warning: Non-zero charge not fully implemented yet.\n";
     }
@@ -275,67 +224,54 @@ int main(int argc, char* argv[]) {
     // --- Create cuEST context ---
     CuESTContext ctx;
 
-    // --- Build primary basis ---
+    // --- Build primary basis from JSON ---
     if (!quiet) std::cout << "Building primary basis from: " << basis_path << "\n";
-    BasisBuilder basis_builder(ctx, mol, is_pure);
-
-    // Auto-detect format: .json files use BSE JSON parser, otherwise GBS
-    bool use_json = (basis_path.size() > 5 &&
-                     basis_path.compare(basis_path.size() - 5, 5, ".json") == 0);
-    if (use_json) {
-      basis_builder.build_from_json(basis_path);
-    } else {
-      basis_builder.build_from_gbs(basis_path);
-    }
+    BasisBuilder basis_builder(ctx, mol, /*is_pure=*/1);
+    basis_builder.build_from_json(basis_path);
 
     uint64_t nao = basis_builder.nao();
     if (!quiet) std::cout << "  Basis functions: " << nao << "\n";
 
-    // --- Build auxiliary basis (for DF) ---
+    // --- Build auxiliary basis ---
     AuxBasis* aux_basis_ptr = nullptr;
     std::unique_ptr<AuxBasis> aux_basis;
 
     if (use_df) {
-      std::string aux_path = aux_basis_path;
-      if (aux_path.empty()) {
-        // Try to infer: append "-jkfit" or use def2-universal-jkfit
+      if (aux_basis_path.empty()) {
         std::cerr << "Warning: No auxiliary basis specified. "
                   << "Density fitting requires --aux-basis.\n";
-        std::cerr << "  Consider using: def2-universal-jkfit.gbs\n";
         use_df = false;
       } else {
-        if (!quiet) std::cout << "Building auxiliary basis from: " << aux_path << "\n";
-        aux_basis = std::make_unique<AuxBasis>(ctx, mol, is_pure);
-        aux_basis->build_from_gbs(aux_path);
+        if (!quiet) std::cout << "Building auxiliary basis from: " << aux_basis_path << "\n";
+        aux_basis = std::make_unique<AuxBasis>(ctx, mol, /*is_pure=*/1);
+        aux_basis->build_from_json(aux_basis_path);
         uint64_t naux = ctx.query_nao(aux_basis->basis());
         if (!quiet) std::cout << "  Auxiliary basis functions: " << naux << "\n";
         aux_basis_ptr = aux_basis.get();
       }
     }
 
-    // --- Build ECP from basis JSON (auto-detected) or explicit file ---
+    // --- Build ECP from JSON (auto-detected) ---
     ECPBuilder* ecp_builder_ptr = nullptr;
     ECPIntegrals* ecp_int_ptr = nullptr;
     std::unique_ptr<ECPBuilder> ecp_builder;
     std::unique_ptr<ECPIntegrals> ecp_int;
+    uint64_t ecp_electrons_removed = 0;
 
-    if (!ecp_path.empty() || use_json) {
-      ecp_builder = std::make_unique<ECPBuilder>(ctx, mol);
-      if (!ecp_path.empty()) {
-        if (!quiet) std::cout << "Building ECP from: " << ecp_path << "\n";
-        ecp_builder->build_from_file(ecp_path);
-      } else if (use_json) {
-        // ECP data is embedded in the JSON basis file
-        ecp_builder->build_from_json(basis_path);
+    ecp_builder = std::make_unique<ECPBuilder>(ctx, mol);
+    ecp_builder->build_from_json(basis_path);
+    ecp_builder_ptr = ecp_builder.get();
+    if (ecp_builder->has_ecp()) {
+      ecp_electrons_removed = ecp_builder_ptr->total_ecp_electrons();
+      if (!quiet) {
+        std::cout << "  ECP active: " << ecp_electrons_removed
+                  << " core electrons replaced\n";
       }
-      ecp_builder_ptr = ecp_builder.get();
-      if (!ecp_builder->has_ecp() && !quiet) {
-        std::cout << "  No ECP atoms found in molecule.\n";
-      }
+    } else if (!quiet) {
+      std::cout << "  No ECP atoms found in molecule.\n";
     }
 
     // --- Build DFT grid ---
-    // (The XCBuilder needs a molecular grid; we create it here)
     GridBuilder grid_builder(ctx, mol, radial_pts, angular_pts);
     if (!quiet) {
       std::cout << "Building DFT integration grid: "
@@ -345,8 +281,7 @@ int main(int argc, char* argv[]) {
     auto mol_grid = grid_builder.build();
 
     // --- Build XC functional ---
-    XCBuilder xc(ctx, basis_builder.basis(), mol_grid,
-                  functional_id);
+    XCBuilder xc(ctx, basis_builder.basis(), mol_grid, functional_id);
     if (!quiet) {
       std::cout << "Functional: " << functional_name;
       if (xc.is_hybrid())
@@ -355,17 +290,14 @@ int main(int argc, char* argv[]) {
       std::cout << "\n\n";
     }
 
-    // --- Set up DF-JK or exact JK ---
-    // For DFT with DF, we use the auxiliary basis for J and K matrices
+    // --- Set up DF-JK ---
     DFJKBuilder* dfjk_ptr = nullptr;
     std::unique_ptr<DFJKBuilder> dfjk;
 
     if (use_df && aux_basis_ptr) {
       if (!quiet) std::cout << "Setting up density-fitted J/K builder...\n";
       auto xyz = mol.xyz_host();
-      // DF plan exchange parameters for LRC functionals:
-      // K matrix = EXCHANGE_FRACTION * K_SR + LRC_FRACTION * K_LR(omega)
-      // Standard hybrids: use defaults (ex_frac=1.0, scaling in Fock build)
+
       double ex_frac = 1.0, lrc_frac = 0.0, lrc_omega = 0.0;
       if (functional_name == "CAM-B3LYP") {
         ex_frac = 0.19; lrc_frac = 0.46; lrc_omega = 0.33;
@@ -390,7 +322,6 @@ int main(int argc, char* argv[]) {
     }
 
     // --- Set up ECP integrals ---
-    uint64_t ecp_electrons_removed = 0;
     if (ecp_builder_ptr && ecp_builder_ptr->has_ecp()) {
       auto xyz_h = mol.xyz_host();
       ecp_int = std::make_unique<ECPIntegrals>(
@@ -399,11 +330,6 @@ int main(int argc, char* argv[]) {
           ecp_builder_ptr->ecp_indices().data(),
           ecp_builder_ptr->ecp_atoms().data());
       ecp_int_ptr = ecp_int.get();
-      ecp_electrons_removed = ecp_builder_ptr->total_ecp_electrons();
-      if (!quiet) {
-        std::cout << "  ECP active: " << ecp_electrons_removed
-                  << " core electrons replaced\n";
-      }
     }
 
     // --- Configure SCF ---
@@ -414,7 +340,6 @@ int main(int argc, char* argv[]) {
     scf_params.diis_start = diis_start;
     scf_params.diis_max_space = diis_space;
     scf_params.damping = damping;
-    scf_params.level_shift = level_shift;
     scf_params.verbose = verbose;
     scf_params.print_mos = print_mos;
     scf_params.print_level = quiet ? 0 : (verbose ? 2 : 1);
@@ -428,13 +353,12 @@ int main(int argc, char* argv[]) {
 
     // --- Gradient computation ---
     if (gradient && scf.converged()) {
-      // Analytical gradient (full electronic + nuclear, all cuEST derivative APIs)
       auto C_host = scf.mo_coefficients_host();
       auto D_host = scf.density_host();
-      GradientComputer gc(ctx, basis_builder, *dfjk_ptr, &xc, ecp_int_ptr, mol, scf.orbital_energies(), C_host, D_host);
+      GradientComputer gc(ctx, basis_builder, *dfjk_ptr, &xc, ecp_int_ptr, mol,
+                          scf.orbital_energies(), C_host, D_host);
       auto analytical = gc.compute();
 
-      // Debug: print individual gradient components for validation
       if (verbose) {
         auto print_comp = [&](const char* label, const std::vector<double>& g) {
           std::cout << "  " << label;
@@ -453,7 +377,6 @@ int main(int argc, char* argv[]) {
         if (ecp_int_ptr) print_comp("ECP    ", gc.ecpg());
         print_comp("DF-J   ", gc.df());
         print_comp("XC     ", gc.xc());
-        // Check translational invariance: sum of forces should be ~0
         double fx=0,fy=0,fz=0;
         for(size_t i=0;i<mol.natom()*3;i+=3){fx+=analytical[i];fy+=analytical[i+1];fz+=analytical[i+2];}
         std::cout << "  Sum of forces: [" << fx << " " << fy << " " << fz << "] (should be ~0)\n\n";
@@ -468,14 +391,12 @@ int main(int argc, char* argv[]) {
                   << "  |F| = " << std::sqrt(fx*fx+fy*fy+fz*fz) << "\n";
       }
 
-      // Numerical gradient (validated reference) — finds binary relative to CWD
       const char* exe_path = argv[0];
       auto forces = numerical_gradient(mol, basis_path, aux_basis_path,
-          ecp_path, is_pure, functional_id, radial_pts, angular_pts,
+          functional_id, radial_pts, angular_pts,
           scf_params, quiet, exe_path);
 
       std::cout << "\n=== Numerical Gradient (Ha/bohr) ===\n";
-      std::cout << std::setprecision(8) << std::fixed;
       for (size_t a = 0; a < mol.natom(); a++) {
         double fx = forces[3*a], fy = forces[3*a+1], fz = forces[3*a+2];
         double fnorm = std::sqrt(fx*fx + fy*fy + fz*fz);
@@ -483,13 +404,12 @@ int main(int argc, char* argv[]) {
                   << std::setw(13) << fx << std::setw(13) << fy
                   << std::setw(13) << fz << "  |F| = " << fnorm << "\n";
       }
-      std::cout << "  (Convert to eV/Å: multiply by 51.422067)\n";
     } else if (gradient && !scf.converged()) {
       std::cerr << "Gradient requested but SCF not converged — skipping.\n";
     }
 
     // --- Final output ---
-    {  // always print final energy
+    {
       std::cout << "\n" << std::string(60, '=') << "\n";
       std::cout << "Final SCF energy: "
                 << std::setprecision(14) << std::fixed
