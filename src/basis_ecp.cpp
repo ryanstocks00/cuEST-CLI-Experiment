@@ -54,24 +54,39 @@ void ECPBuilder::build_from_file(const std::string& ecp_path) {
     }
   }
 
-  // Create ECP atoms
+  // Create ECP atoms: one per active atom center (not per unique element!)
   uint64_t shell_head = 0, top_head = 0;
-  for (size_t u = 0; u < unique.size(); u++) {
+  for (size_t a = 0; a < mol_.natom(); a++) {
+    // Find which unique element this atom is
+    int u = -1;
+    for (size_t j = 0; j < unique.size(); j++)
+      if (mol_.atom(a).symbol == unique[j]) { u = (int)j; break; }
+    if (u < 0) continue;
+
     const auto& ecp = element_ecps[u];
     if (ecp.n_shells == 0) continue;
+
     size_t num_shells = ecp.n_shells - 1;
+    // Find the shell handles for this unique element
+    uint64_t u_shell_head = 0, u_top_head = 0;
+    for (int j = 0; j < u; j++) {
+      if (element_ecps[j].n_shells > 0) {
+        u_shell_head += element_ecps[j].n_shells - 1;
+        u_top_head += 1;
+      }
+    }
+
     std::vector<cuestECPShell_t> sh_raw(num_shells);
     for (size_t k = 0; k < num_shells; k++)
-      sh_raw[k] = ecp_shell_handles_[shell_head + k].get();
+      sh_raw[k] = ecp_shell_handles_[u_shell_head + k].get();
+
     ECPAtomHandle atom;
     CUEST_CHECK(cuestECPAtomCreate(
         static_cast<cuestHandle_t>(ctx_),
         ecp.n_elec, num_shells, sh_raw.data(),
-        ecp_top_shell_handles_[top_head].get(),
+        ecp_top_shell_handles_[u_top_head].get(),
         ECPAtomParams{}, atom.ptr()));
     ecp_atom_handles_.push_back(std::move(atom));
-    shell_head += num_shells;
-    top_head += 1;
   }
 
   for (auto& a : ecp_atom_handles_)
