@@ -456,8 +456,7 @@ def run_validation(matrix, results_file, skip_existing=False):
         ok = False
         if cuest_r["ok"] and pyscf_r["ok"]:
             diff_ha = cuest_r["energy"] - pyscf_r["energy"]
-            from constants import HARTREE_PER_EV
-            diff_ev = diff_ha * HARTREE_PER_EV
+            diff_ev = diff_ha * 27.211386245988
             ok = abs(diff_ha) < 1e-4  # 0.1 mHa tolerance
             status = "PASS" if ok else "FAIL"
             print(f"  Diff: {diff_ha:+.6e} Ha ({diff_ev:+.6f} eV)  [{status}]")

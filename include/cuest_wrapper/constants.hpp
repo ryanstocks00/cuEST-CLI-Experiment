@@ -14,11 +14,11 @@ namespace constants {
 // Length
 // ---------------------------------------------------------------------------
 
-/// Bohr radius in angstrom: a0 = 1 bohr ≈ 0.529177210903 Å (CODATA 2018)
-constexpr double bohr_per_angstrom = 0.529177210903;
+/// Bohr radius in angstrom — matches PySCF value for exact comparison
+constexpr double bohr_per_angstrom = 0.52917721092;
 
 /// Angstrom per bohr
-constexpr double angstrom_per_bohr = 1.0 / bohr_per_angstrom;  // ≈ 1.8897259886
+constexpr double angstrom_per_bohr = 1.0 / bohr_per_angstrom;  // ≈ 1.8897259887
 
 // ---------------------------------------------------------------------------
 // Energy
