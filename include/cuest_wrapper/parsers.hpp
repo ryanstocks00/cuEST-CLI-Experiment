@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 
+#include "constants.hpp"
 #include "molecule.hpp"
 
 namespace cuest {
@@ -52,7 +53,7 @@ struct XYZData {
 // XYZ file parser
 // ---------------------------------------------------------------------------
 inline XYZData parse_xyz(const std::string& filepath,
-                          double ang_to_bohr = 1.0 / 0.529177210903) {
+                          double ang_to_bohr = constants::angstrom_per_bohr) {
   std::ifstream fin(filepath);
   if (!fin) throw std::runtime_error("Cannot open XYZ file: " + filepath);
 

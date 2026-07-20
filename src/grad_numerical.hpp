@@ -17,6 +17,7 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include "cuest_wrapper/constants.hpp"
 #include "cuest_wrapper/molecule.hpp"
 #include "cuest_wrapper/scf.hpp"
 
@@ -53,7 +54,7 @@ inline std::vector<double> numerical_gradient(
 {
   size_t natom = mol.natom();
   double delta = 0.005; // Angstrom
-  double delta_bohr = delta / 0.529177210903;
+  double delta_bohr = delta * constants::angstrom_per_bohr;
   std::vector<double> forces(natom*3, 0.0);
 
   const char* func_name = functional_id_to_name(func_id);
@@ -68,9 +69,9 @@ inline std::vector<double> numerical_gradient(
         if (!f) continue;
         fprintf(f, "%zu\nnumerical gradient displacement\n", natom);
         for (size_t i = 0; i < natom; i++) {
-          double x = mol.atom(i).x * 0.529177210903;
-          double y = mol.atom(i).y * 0.529177210903;
-          double z = mol.atom(i).z * 0.529177210903;
+          double x = mol.atom(i).x * constants::bohr_per_angstrom;
+          double y = mol.atom(i).y * constants::bohr_per_angstrom;
+          double z = mol.atom(i).z * constants::bohr_per_angstrom;
           if (i == a) {
             if (xyz == 0) x += sgn * delta;
             if (xyz == 1) y += sgn * delta;

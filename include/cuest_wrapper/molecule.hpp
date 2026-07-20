@@ -10,6 +10,8 @@
 #include <unordered_set>
 #include <vector>
 
+#include "constants.hpp"
+
 namespace cuest {
 
 // ---------------------------------------------------------------------------
@@ -30,7 +32,8 @@ class Molecule {
 
   // Add atom with coordinates in angstrom (converts to bohr internally)
   void add_atom(const std::string& symbol, double x_ang, double y_ang,
-                double z_ang, double ang_to_bohr = 1.0 / 0.529177210903) {
+                double z_ang,
+                double ang_to_bohr = constants::angstrom_per_bohr) {
     Atom atom;
     atom.symbol = symbol;
     atom.x = x_ang * ang_to_bohr;

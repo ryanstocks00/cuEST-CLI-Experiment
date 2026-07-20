@@ -415,7 +415,7 @@ int main(int argc, char* argv[]) {
                 << std::setprecision(14) << std::fixed
                 << scf.total_energy() << " Ha\n";
       std::cout << "  ("
-                << std::setprecision(8) << scf.total_energy() * 27.211386245988
+                << std::setprecision(8) << scf.total_energy() * constants::hartree_per_ev
                 << " eV)\n";
       if (!scf.converged())
         std::cerr << "WARNING: SCF did not converge!\n";
