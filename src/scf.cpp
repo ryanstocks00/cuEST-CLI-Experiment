@@ -262,19 +262,75 @@ void SCFSolver::run() {
 
   build_core_hamiltonian();
 
-  // Initial guess: use core Hamiltonian directly (Hcore guess).
-  // This is more robust than SAD for systems with ECPs, where per-atom
-  // AO counts may not match the basis set.
-  {
-    // Fock = Hcore as initial guess
-    cublasDcopy(cublas_, nao_*nao_, d_Hcore_, 1, d_Fock_, 1);
+  // Initial guess.
+  // Hcore guess for ECP systems (SAD unreliable with valence-only basis).
+  // SAD guess for all-electron (much better for heavy atoms like Br).
+  bool use_hcore_guess = (params_.ecp_electrons > 0);
+  int N_guess = static_cast<int>(nao_);
+
+  if (use_hcore_guess) {
+    cublasDcopy(cublas_, N_guess*N_guess, d_Hcore_, 1, d_Fock_, 1);
     diagonalize_fock();
     build_density_matrix();
-    if (params_.print_level >= 2) {
-      int N = static_cast<int>(nao_);
+    if (params_.print_level >= 2)
       std::cout << "  Hcore initial guess: Tr[D*S] = " << std::fixed
-                << std::setprecision(6) << trace_dot(d_D_, d_S_, N) << "\n";
+                << std::setprecision(6) << trace_dot(d_D_, d_S_, N_guess) << "\n";
+  } else {
+    // SAD: superposition of atomic densities
+    std::vector<double> S_h(N_guess*N_guess);
+    cudaMemcpy(S_h.data(), d_S_, N_guess*N_guess*sizeof(double), cudaMemcpyDeviceToHost);
+
+    std::vector<double> D_sad(N_guess*N_guess, 0.0);
+    std::vector<int> ao_per_atom(mol_.natom(), 0);
+    std::vector<int> ao_start(mol_.natom(), 0);
+
+    int ao_fill = 0;
+    for (size_t a = 0; a < mol_.natom(); a++) {
+      ao_start[a] = ao_fill;
+      int Z = mol_.atom(a).atomic_number;
+      int nao = (Z <= 2) ? 5 : 14;
+      if (Z > 10) nao = (Z <= 18) ? 18 : 27;
+      if (Z > 36) nao = 32;
+      ao_per_atom[a] = std::min(nao, N_guess - ao_fill);
+      ao_fill += ao_per_atom[a];
     }
+
+    auto nval = [](int Z) {
+      if (Z <= 2) return Z;
+      if (Z <= 10) return Z - 2;
+      if (Z <= 18) return Z - 10;
+      if (Z <= 36) return Z - 18;
+      return Z - 36;
+    };
+
+    for (size_t a = 0; a < mol_.natom(); a++) {
+      int nv = nval(mol_.atom(a).atomic_number);
+      int start = ao_start[a];
+      int count = ao_per_atom[a];
+      if (count <= 0) continue;
+      double occ_per_ao = static_cast<double>(nv) / count * 0.5;
+      for (int i = start; i < start + count && i < N_guess; i++)
+        D_sad[i*N_guess + i] = occ_per_ao;
+    }
+
+    double trDS = 0.0;
+    for (int i = 0; i < N_guess; i++)
+      for (int j = 0; j < N_guess; j++)
+        trDS += D_sad[i*N_guess + j] * S_h[j*N_guess + i];
+    double scale = nocc_ / std::max(trDS, 1e-10);
+    for (auto& d : D_sad) d *= scale;
+
+    std::vector<double> F_init(N_guess*N_guess);
+    cudaMemcpy(F_init.data(), d_Hcore_, N_guess*N_guess*sizeof(double), cudaMemcpyDeviceToHost);
+    const double mix = 0.5;
+    for (int i = 0; i < N_guess*N_guess; i++) F_init[i] += mix * D_sad[i];
+    cudaMemcpy(d_Fock_, F_init.data(), N_guess*N_guess*sizeof(double), cudaMemcpyHostToDevice);
+
+    diagonalize_fock();
+    build_density_matrix();
+    if (params_.print_level >= 2)
+      std::cout << "  SAD initial guess: Tr[D*S] = " << std::fixed
+                << std::setprecision(6) << trace_dot(d_D_, d_S_, N_guess) << "\n";
   }
 
   // DIIS arrays
