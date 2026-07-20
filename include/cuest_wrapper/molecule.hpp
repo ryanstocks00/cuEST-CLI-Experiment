@@ -4,6 +4,7 @@
  * @brief Molecule representation: atoms, coordinates, charges.
  */
 
+#include <cctype>
 #include <cmath>
 #include <string>
 #include <stdexcept>
@@ -21,6 +22,7 @@ struct Atom {
   std::string symbol;
   double x{0.0}, y{0.0}, z{0.0};  // coordinates in bohr
   int atomic_number{0};
+  int ecp_electrons{0};  // core electrons replaced by ECP (0 if all-electron)
 };
 
 // ---------------------------------------------------------------------------
@@ -64,23 +66,45 @@ class Molecule {
   }
   [[nodiscard]] const std::vector<Atom>& atoms() const { return atoms_; }
 
-  // Total number of electrons (neutral)
-  [[nodiscard]] int nelec() const {
-    int nel = 0;
-    for (const auto& a : atoms_) nel += a.atomic_number;
-    return nel;
+  void set_charge(int charge) { charge_ = charge; }
+  [[nodiscard]] int charge() const { return charge_; }
+
+  void set_atom_ecp_electrons(size_t i, int n_core) {
+    if (i >= atoms_.size())
+      throw std::out_of_range("Atom index out of range for ECP assignment");
+    if (n_core < 0 || n_core > atoms_[i].atomic_number)
+      throw std::runtime_error("Invalid ECP electron count for atom " +
+                               std::to_string(i));
+    atoms_[i].ecp_electrons = n_core;
   }
 
-  // Number of occupied orbitals (RHF/RKS: nalpha = nbeta = nelec/2)
+  // Effective nuclear charge Z_eff = Z - n_core
+  [[nodiscard]] int zeff(size_t i) const {
+    return atoms_[i].atomic_number - atoms_[i].ecp_electrons;
+  }
+
+  [[nodiscard]] int total_ecp_electrons() const {
+    int n = 0;
+    for (const auto& a : atoms_) n += a.ecp_electrons;
+    return n;
+  }
+
+  // Valence electrons after ECP and molecular charge: sum(Z_eff) - charge
+  [[nodiscard]] int nelec() const {
+    int nel = 0;
+    for (const auto& a : atoms_)
+      nel += a.atomic_number - a.ecp_electrons;
+    return nel - charge_;
+  }
+
+  // Occupied orbitals for closed-shell RKS (requires even nelec)
   [[nodiscard]] int nocc() const { return nelec() / 2; }
 
-  // Spin multiplicity info
   [[nodiscard]] int multiplicity() const { return multiplicity_; }
   void set_multiplicity(int mult) { multiplicity_ = mult; }
   [[nodiscard]] int nalpha() const { return (nelec() + multiplicity_ - 1) / 2; }
   [[nodiscard]] int nbeta() const { return (nelec() - multiplicity_ + 1) / 2; }
 
-  // Coordinate arrays for cuEST
   [[nodiscard]] std::vector<double> xyz_host() const {
     std::vector<double> xyz(natom() * 3);
     for (size_t i = 0; i < natom(); i++) {
@@ -91,15 +115,14 @@ class Molecule {
     return xyz;
   }
 
-  // Charges for cuEST: -1 * nuclear_charge (electron = -1 convention)
+  // Charges for cuEST: -Z_eff (electron = -1 convention)
   [[nodiscard]] std::vector<double> charges_host() const {
     std::vector<double> c(natom());
     for (size_t i = 0; i < natom(); i++)
-      c[i] = -1.0 * atoms_[i].atomic_number;
+      c[i] = -1.0 * zeff(i);
     return c;
   }
 
-  // Unique element symbols (O(1) via unordered_set)
   [[nodiscard]] std::vector<std::string> unique_symbols() const {
     std::unordered_set<std::string> seen;
     std::vector<std::string> uniq;
@@ -110,7 +133,7 @@ class Molecule {
     return uniq;
   }
 
-  // Total nuclear repulsion energy
+  // Nuclear repulsion using Z_eff (ECP-aware)
   [[nodiscard]] double nuclear_repulsion() const {
     double enuc = 0.0;
     for (size_t i = 0; i < natom(); i++) {
@@ -118,14 +141,16 @@ class Molecule {
         double dx = atoms_[i].x - atoms_[j].x;
         double dy = atoms_[i].y - atoms_[j].y;
         double dz = atoms_[i].z - atoms_[j].z;
-        double r = std::sqrt(dx * dx + dy * dy + dz * dz);
-        enuc += atoms_[i].atomic_number * atoms_[j].atomic_number / r;
+        double r2 = dx * dx + dy * dy + dz * dz;
+        if (r2 < 1e-20)
+          throw std::runtime_error("Coincident atoms in nuclear repulsion");
+        double r = std::sqrt(r2);
+        enuc += static_cast<double>(zeff(i)) * static_cast<double>(zeff(j)) / r;
       }
     }
     return enuc;
   }
 
-  // Symbol-to-atomic-number lookup (shared with parsers)
   [[nodiscard]] static int symbol_to_z(const std::string& sym) {
     static const char* elements[] = {
         "X",  "H",  "HE", "LI", "BE", "B",  "C",  "N",  "O",  "F",  "NE",
@@ -141,7 +166,8 @@ class Molecule {
         "MD", "NO", "LR", "RF", "DB", "SG", "BH", "HS", "MT", "DS",
         "RG", "CN", "NH", "FL", "MC", "LV", "TS", "OG"};
     std::string upper = sym;
-    for (auto& c : upper) c = static_cast<char>(toupper(c));
+    for (auto& c : upper)
+      c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
     for (int i = 0; i < 119; i++) {
       if (upper == elements[i]) return i;
     }
@@ -149,9 +175,9 @@ class Molecule {
   }
 
  private:
-
   std::vector<Atom> atoms_;
-  int multiplicity_{1};  // 1=singlet, 2=doublet, 3=triplet, etc.
+  int multiplicity_{1};
+  int charge_{0};
 };
 
 }  // namespace cuest

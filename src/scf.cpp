@@ -6,6 +6,7 @@
 #include <cstring>
 #include <iomanip>
 #include <iostream>
+#include <stdexcept>
 namespace cuest {
 
 // ---------------------------------------------------------------------------
@@ -16,12 +17,20 @@ SCFSolver::SCFSolver(CuESTContext& ctx, BasisBuilder& basis,
     : ctx_(ctx), basis_(basis), dfjk_(dfjk), xc_(xc),
       ecp_builder_(ecp_builder), ecp_int_(ecp_int),
       mol_(mol), params_(params) {
-  cublasCreate(&cublas_);
-  cusolverDnCreate(&cusolver_);
+  (void)ecp_builder_;
+  if (cublasCreate(&cublas_) != CUBLAS_STATUS_SUCCESS)
+    throw std::runtime_error("cublasCreate failed");
+  if (cusolverDnCreate(&cusolver_) != CUSOLVER_STATUS_SUCCESS)
+    throw std::runtime_error("cusolverDnCreate failed");
   nao_ = ctx_.query_nao(basis_.basis());
-  // Adjust electron count for ECP core electrons
-  nelec_ = mol_.nelec() - static_cast<int>(params_.ecp_electrons);
-  nocc_ = nelec_ / 2;
+  // Molecule::nelec() already accounts for ECP (Z_eff) and molecular charge
+  nelec_ = mol_.nelec();
+  if (nelec_ < 0)
+    throw std::runtime_error("Negative electron count after charge/ECP");
+  if (nelec_ % 2 != 0)
+    throw std::runtime_error(
+        "Odd electron count — only closed-shell RKS is supported");
+  nocc_ = static_cast<uint64_t>(mol_.nocc());
   e_nuc_ = mol_.nuclear_repulsion();
 
   size_t N2 = nao_ * nao_;
@@ -45,10 +54,10 @@ SCFSolver::SCFSolver(CuESTContext& ctx, BasisBuilder& basis,
   auto chg_h = mol_.charges_host();
   d_xyz_.alloc(xyz_h.size() * sizeof(double));
   d_charges_.alloc(chg_h.size() * sizeof(double));
-  cudaMemcpy(d_xyz_, xyz_h.data(), xyz_h.size()*sizeof(double), cudaMemcpyHostToDevice);
-  cudaMemcpy(d_charges_, chg_h.data(), chg_h.size()*sizeof(double), cudaMemcpyHostToDevice);
-  cudaMemset(d_D_, 0, N2 * sizeof(double));
-  cudaMemset(d_ECP_, 0, N2 * sizeof(double));
+  CUDA_CHECK(cudaMemcpy(d_xyz_, xyz_h.data(), xyz_h.size()*sizeof(double), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_charges_, chg_h.data(), chg_h.size()*sizeof(double), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemset(d_D_, 0, N2 * sizeof(double)));
+  CUDA_CHECK(cudaMemset(d_ECP_, 0, N2 * sizeof(double)));
 }
 
 SCFSolver::~SCFSolver() {
@@ -81,8 +90,8 @@ double SCFSolver::trace_dot(const double* d_A, const double* d_B, int N) {
 // Core Hamiltonian: Hcore = T + V (+ V_ECP if present)
 // ---------------------------------------------------------------------------
 void SCFSolver::build_core_hamiltonian() {
-  AOPairListHandle pair_list = basis_.create_pair_list();
-  OneElectronIntegrals oe(ctx_, basis_.basis(), pair_list);
+  const OwnedAOPairList& pair_list = basis_.pair_list();
+  OneElectronIntegrals oe(ctx_, basis_.basis(), pair_list.get());
   oe.compute_kinetic(d_T_);
   oe.compute_potential(d_V_, mol_.natom(), d_xyz_, d_charges_);
   oe.compute_overlap(d_S_);
@@ -172,29 +181,25 @@ void SCFSolver::diagonalize_fock() {
       N, d_Fwork_, lda, d_Swork_, lda,
       d_eigvals_, &lwork);
 
-  // Allocate device workspace
   double* d_work = nullptr;
-  cudaMalloc(&d_work, lwork * sizeof(double));
+  CUDA_CHECK(cudaMalloc(&d_work, lwork * sizeof(double)));
   int* d_info = nullptr;
-  cudaMalloc(&d_info, sizeof(int));
+  CUDA_CHECK(cudaMalloc(&d_info, sizeof(int)));
 
-  // Solve generalized eigenvalue problem: Fwork * C = Swork * C * E
-  cusolverDnDsygvd(cusolver_, CUSOLVER_EIG_TYPE_1,
+  cusolverStatus_t st = cusolverDnDsygvd(cusolver_, CUSOLVER_EIG_TYPE_1,
       CUSOLVER_EIG_MODE_VECTOR, CUBLAS_FILL_MODE_LOWER,
       N, d_Fwork_, lda, d_Swork_, lda,
       d_eigvals_, d_work, lwork, d_info);
 
   int info_h = 0;
-  cudaMemcpy(&info_h, d_info, sizeof(int), cudaMemcpyDeviceToHost);
+  CUDA_CHECK(cudaMemcpy(&info_h, d_info, sizeof(int), cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaFree(d_work));
+  CUDA_CHECK(cudaFree(d_info));
 
-  cudaFree(d_work);
-  cudaFree(d_info);
-
-  if (info_h != 0) {
-    std::cerr << "WARNING: dsygvd info = " << info_h;
-    if (info_h > 0)
-      std::cerr << " (B not positive definite?)";
-    std::cerr << "\n";
+  if (st != CUSOLVER_STATUS_SUCCESS || info_h != 0) {
+    throw std::runtime_error(
+        "cuSOLVER dsygvd failed (status=" + std::to_string(static_cast<int>(st)) +
+        ", info=" + std::to_string(info_h) + ")");
   }
 
   // d_Fwork_ now contains the eigenvectors C (column-major)
@@ -255,9 +260,10 @@ void SCFSolver::run() {
                        << (xc_->is_hybrid() ? " (hybrid)" : "") << "\n";
     if (params_.damping > 0.0)
       std::cout << "  Damping: " << params_.damping << "\n";
-    if (params_.level_shift != 0.0)
-      std::cout << "  Level shift: " << params_.level_shift
-                << " (NOTE: not yet implemented — ignored)\n";
+    if (mol_.charge() != 0)
+      std::cout << "  Charge: " << mol_.charge() << "\n";
+    if (mol_.total_ecp_electrons() > 0)
+      std::cout << "  ECP electrons removed: " << mol_.total_ecp_electrons() << "\n";
   }
 
   build_core_hamiltonian();
@@ -265,7 +271,7 @@ void SCFSolver::run() {
   // Initial guess.
   // Hcore guess for ECP systems (SAD unreliable with valence-only basis).
   // SAD guess for all-electron (much better for heavy atoms like Br).
-  bool use_hcore_guess = (params_.ecp_electrons > 0);
+  bool use_hcore_guess = (mol_.total_ecp_electrons() > 0);
   int N_guess = static_cast<int>(nao_);
 
   if (use_hcore_guess) {
@@ -462,19 +468,7 @@ void SCFSolver::run() {
           coeffs[i] = s / Bc[i*m+i];
         }
 
-        // Clamp DIIS coefficients to [0, 1] to prevent extrapolation
-        // overshoot (critical for systems with deep ECPs).
-        // Re-normalize after clamping.
-        double coeff_sum = 0.0;
-        for (int i = 0; i < nvec; i++) {
-          if (coeffs[i] < 0.0) coeffs[i] = 0.0;
-          if (coeffs[i] > 1.0) coeffs[i] = 1.0;
-          coeff_sum += coeffs[i];
-        }
-        if (coeff_sum > 1e-12) {
-          for (int i = 0; i < nvec; i++) coeffs[i] /= coeff_sum;
-        }
-
+        // Use raw Pulay coefficients; trust-region below rejects bad DIIS.
         std::vector<double> F_diis(N*N, 0.0);
         for (int i = 0; i < nvec; i++)
           for (int j = 0; j < N*N; j++)

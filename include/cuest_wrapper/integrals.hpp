@@ -34,9 +34,9 @@ class OneElectronIntegrals {
 
  private:
   CuESTContext& ctx_;
-  OEIntPlanHandle plan_;
   cuestWorkspaceDescriptor_t persistent_desc_{};
-  Workspace persistent_ws_;
+  Workspace persistent_ws_;  // outlives plan_
+  OEIntPlanHandle plan_;
 };
 
 // Named constant for max GPU variable buffer (2 GB)
@@ -64,10 +64,11 @@ class DFJKBuilder {
 
  private:
   CuESTContext& ctx_;
+  // Persist buffers outlive the handles that use them (destroyed last).
+  Workspace pair_list_persist_;
+  Workspace plan_persist_;
+  AOPairListHandle pair_list_;
   DFIntPlanHandle plan_;
-  AOPairListHandle pair_list_;          // pair list must outlive plan
-  void* pair_list_persist_dev_{nullptr}; // pair list persistent workspace
-  void* plan_persist_dev_{nullptr};      // DF plan persistent workspace
 };
 
 // ---------------------------------------------------------------------------
@@ -109,7 +110,6 @@ class XCBuilder {
                         double* d_Vxc_a, double* d_Vxc_b,
                         size_t variable_buf_bytes = 2000000000ULL);
 
-  ~XCBuilder();
   cuestXCIntPlan_t plan() const { return plan_.get(); }
   // Query if functional is hybrid (has exact exchange)
   bool is_hybrid();
@@ -121,8 +121,9 @@ class XCBuilder {
 
   CuESTContext& ctx_;
   cuestMolecularGrid_t mol_grid_;  // raw handle, NOT owned (owned by caller)
+  // persist outlives plan (destroyed last)
+  Workspace xc_persist_ws_;
   XCIntPlanHandle plan_;
-  void* xc_persist_dev_{nullptr};  // KEPT ALIVE for compute
 };
 
 // ---------------------------------------------------------------------------
@@ -139,9 +140,9 @@ class ECPIntegrals {
 
  private:
   CuESTContext& ctx_;
-  ECPIntPlanHandle plan_;
   cuestWorkspaceDescriptor_t persistent_desc_{};
-  Workspace persistent_ws_;
+  Workspace persistent_ws_;  // outlives plan_
+  ECPIntPlanHandle plan_;
 };
 
 }  // namespace cuest

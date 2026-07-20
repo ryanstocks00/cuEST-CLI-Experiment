@@ -19,8 +19,9 @@ import sys
 import time
 from pathlib import Path
 
-PROJ_DIR = Path(__file__).resolve().parent.parent
-EXE = PROJ_DIR / "build" / "cuest_dft"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from common import AUX_JSON, BASIS_DIR, EXE, PROJ_DIR, parse_cuest_energy  # noqa: E402
+
 REFERENCE_FILE = PROJ_DIR / "test" / "reference.json"
 RESULTS_FILE = PROJ_DIR / "test" / "cuest_results.json"
 
@@ -47,7 +48,7 @@ def run_cuest(config, aux_path, timeout=300):
     try:
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout,
-            env={**os.environ, "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES", "0")},
+            env=dict(os.environ),
         )
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": "timeout", "wall_s": timeout}
@@ -61,25 +62,13 @@ def run_cuest(config, aux_path, timeout=300):
                 "stderr": "\n".join(result.stderr.splitlines()[-5:]),
                 "wall_s": elapsed}
 
-    energy = None
-    converged = False
-    for line in result.stdout.splitlines():
-        if "Final SCF energy:" in line:
-            pos = line.find("Final SCF energy:")
-            try:
-                energy = float(line[pos + len("Final SCF energy:"):].strip().split()[0])
-            except (ValueError, IndexError):
-                pass
-        if "SCF converged" in line.lower():
-            converged = True
-        if "Converged:" in line and "Yes" in line:
-            converged = True
-    if not converged:
-        converged = ("did not converge" not in result.stdout
-                     and "did not converge" not in result.stderr)
+    energy, converged = parse_cuest_energy(result.stdout + "\n" + result.stderr)
 
     if energy is None:
-        return {"ok": False, "error": "could not parse energy", "wall_s": elapsed}
+        return {"ok": False, "error": "could not parse energy or non-finite", "wall_s": elapsed}
+    if not converged:
+        return {"ok": False, "error": "SCF did not converge", "energy_ha": energy,
+                "converged": False, "wall_s": elapsed}
 
     return {"ok": True, "energy_ha": energy, "converged": converged, "wall_s": elapsed}
 
@@ -118,7 +107,7 @@ def main():
     print(f"Generated: {ref_data.get('generated', 'unknown')}")
 
     # Build aux path lookup
-    aux_path = str(PROJ_DIR / "data" / "basis_sets" / "def2-universal-jkfit.json")
+    aux_path = str(BASIS_DIR / AUX_JSON)
 
     # Filter references by molecule/functional
     refs = references
@@ -251,7 +240,7 @@ def main():
         json.dump(results, f, indent=2)
     print(f"\nResults written to {RESULTS_FILE}")
 
-    sys.exit(0 if n_fail == 0 else 1)
+    sys.exit(0 if (n_fail == 0 and n_error == 0) else 1)
 
 
 if __name__ == "__main__":

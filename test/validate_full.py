@@ -1,177 +1,61 @@
 #!/usr/bin/env python3
 """
-FULL validation: gradients, ECPs, range-separated hybrids, functionals.
-Compares cuEST analytical+numerical gradients against PySCF references.
+Full validation: energies + analytical/numerical gradients vs PySCF-DF.
+Uses BSE JSON bases under data/basis_sets/ and molecules under data/molecules/.
 """
-import subprocess, numpy as np, json, sys, os, tempfile, shutil, urllib.request
-from pathlib import Path
+import json
+import sys
+import tempfile
 from datetime import datetime
+from pathlib import Path
 
-PROJ = Path(__file__).parent.parent
-EXE = PROJ / "build" / "cuest_dft"
-DATA = PROJ / "data"
-BSE = "https://www.basissetexchange.org/api/basis"
+import numpy as np
 
-BOHR = 0.52917721092
-ANG2BOHR = 1.0 / BOHR
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from common import (  # noqa: E402
+    AUX_JSON, BASIS_DIR, BASIS_JSON, EXE, MOLECULES_DIR, PROJ_DIR,
+    is_finite, parse_cuest_energy, parse_gradient_block, run_cuest_cmd,
+    run_pyscf_df,
+)
 
-# ======== DOWNLOAD HELPERS ========
-def download_basis(name, fmt="gaussian94"):
-    out = DATA / f"{name}.gbs"
-    if out.exists(): return out
-    url = f"{BSE}/{name}/format/{fmt}/?version=1&optimize_general=true"
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "cuEST/1.0"})
-        data = urllib.request.urlopen(req, timeout=30).read()
-        with open(out, "wb") as f: f.write(data)
-        return out
-    except: return None
-
-# Ensure we have ECP basis
-for b in ["def2-svp-ecp", "def2-universal-jkfit", "def2-svp", "def2-tzvp"]:
-    download_basis(b)
-
-# ======== TEST CONFIGURATIONS ========
-# (molecule_name, xyz_string, functional, basis, use_ecp, check_gradient)
 TARGETS = [
-    # --- Gradient tests: H2O with multiple functionals ---
-    ("H2O", """O 0 0 0; H 0.75695 0.585882 0; H -0.75695 0.585882 0""",
-     "PBE", "def2SVP", False, True),
-    ("H2O", """O 0 0 0; H 0.75695 0.585882 0; H -0.75695 0.585882 0""",
-     "B3LYP", "def2SVP", False, True),
-    ("H2O", """O 0 0 0; H 0.75695 0.585882 0; H -0.75695 0.585882 0""",
-     "PBE0", "def2SVP", False, True),
-    ("H2O", """O 0 0 0; H 0.75695 0.585882 0; H -0.75695 0.585882 0""",
-     "CAM-B3LYP", "def2SVP", False, True),
-
-    # --- Range-separated hybrids ---
-    ("H2O", """O 0 0 0; H 0.75695 0.585882 0; H -0.75695 0.585882 0""",
-     "WB97X", "def2SVP", False, False),
-
-    # --- Larger basis ---
-    ("NH3", """N 0 0 0.1163; H 0 0.9388 -0.2713; H 0.8129 -0.4694 -0.2713; H -0.8129 -0.4694 -0.2713""",
-     "PBE", "def2TZVP", False, False),
-
-    # --- Gradient test: NH3 ---
-    ("NH3", """N 0 0 0.1163; H 0 0.9388 -0.2713; H 0.8129 -0.4694 -0.2713; H -0.8129 -0.4694 -0.2713""",
-     "PBE", "def2SVP", False, True),
-
-    # --- ECP tests ---
-    ("I2", """I 0 0 1.335; I 0 0 -1.335""",
-     "PBE", "def2SVP", True, False),
-    ("Br2", """Br 0 0 1.15; Br 0 0 -1.15""",
-     "PBE", "def2SVP", True, False),
+    # (molecule_xyz, label, functional, basis_key, check_gradient)
+    ("h2o.xyz", "H2O", "PBE", "def2SVP", True),
+    ("h2o.xyz", "H2O", "B3LYP", "def2SVP", True),
+    ("h2o.xyz", "H2O", "PBE0", "def2SVP", True),
+    ("h2o.xyz", "H2O", "CAM-B3LYP", "def2SVP", True),
+    ("h2o.xyz", "H2O", "WB97X", "def2SVP", False),
+    ("nh3.xyz", "NH3", "PBE", "def2TZVP", False),
+    ("nh3.xyz", "NH3", "PBE", "def2SVP", True),
+    ("i2.xyz", "I2", "PBE", "def2SVP", False),
+    ("br2.xyz", "Br2", "PBE", "def2SVP", False),
 ]
 
-def make_xyz(atoms_str, path):
-    """Convert 'C 0 0 0; H 1 0 0' format to XYZ file."""
-    atoms = [a.split() for a in atoms_str.split(";")]
-    with open(path, "w") as f:
-        f.write(f"{len(atoms)}\nvalidation geometry\n")
-        for a in atoms:
-            f.write(f"{a[0]}  {float(a[1]):10.6f}  {float(a[2]):10.6f}  {float(a[3]):10.6f}\n")
 
-def run_cuest(xyz_path, basis_path, aux_path, functional, use_ecp=False, ecp_path=None, max_iter=100):
-    cmd = [str(EXE), "--xyz", str(xyz_path), "--basis", str(basis_path),
-           "--aux-basis", str(aux_path), "--functional", functional,
+def run_cuest_energy(xyz, basis, aux, functional, max_iter=100):
+    cmd = [str(EXE), "--xyz", str(xyz), "--basis", str(basis),
+           "--aux-basis", str(aux), "--functional", functional,
            "--max-iter", str(max_iter), "--conv-thresh", "1e-8", "--quiet"]
-    if use_ecp and ecp_path:
-        cmd += ["--ecp", str(ecp_path)]
-
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-        for line in r.stdout.splitlines():
-            if "Final SCF energy:" in line:
-                return float(line.split()[-2]), True
-        for line in reversed(r.stdout.splitlines()):
-            if "Etot =" in line:
-                return float(line.split("Etot =")[1].split()[0]), True
+    r = run_cuest_cmd(cmd, timeout=300)
+    energy, converged = parse_cuest_energy(r["stdout"] + "\n" + r["stderr"])
+    if not r["ok"] or energy is None or not converged:
         return None, False
-    except Exception as e:
-        return str(e), False
+    return energy, True
 
-def run_cuest_gradient(xyz_path, basis_path, aux_path, functional,
-                        use_ecp=False, ecp_path=None, max_iter=100):
-    """Run cuEST with --gradient, parse both analytical and numerical outputs."""
-    cmd = [str(EXE), "--xyz", str(xyz_path), "--basis", str(basis_path),
-           "--aux-basis", str(aux_path), "--functional", functional,
+
+def run_cuest_gradient(xyz, basis, aux, functional, max_iter=100):
+    cmd = [str(EXE), "--xyz", str(xyz), "--basis", str(basis),
+           "--aux-basis", str(aux), "--functional", functional,
            "--max-iter", str(max_iter), "--gradient", "--quiet"]
-    if use_ecp and ecp_path:
-        cmd += ["--ecp", str(ecp_path)]
+    r = run_cuest_cmd(cmd, timeout=900)
+    text = r["stdout"] + "\n" + r["stderr"]
+    energy, converged = parse_cuest_energy(text)
+    if not r["ok"] or energy is None or not converged:
+        return None, None, None
+    ana = parse_gradient_block(text, "Analytical Gradient")
+    num = parse_gradient_block(text, "Numerical Gradient")
+    return energy, ana, num
 
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-
-        # Parse analytical gradient from RAW_DF + RAW_NU on stderr
-        # Parse numerical gradient from stdout
-        energy = None
-        num_grad = None
-        ana_grad_nu = None
-        ana_grad_df = None
-
-        for line in r.stdout.splitlines():
-            if "Final SCF energy:" in line:
-                energy = float(line.split()[-2])
-            if "Numerical Gradient" in line:
-                num_grad = []
-            if num_grad is not None and "Atom" in line and "|F|" in line:
-                parts = line.split()
-                try:
-                    idx = parts.index("Atom") + 1
-                    fx, fy, fz = float(parts[idx+1]), float(parts[idx+2]), float(parts[idx+3])
-                    num_grad.extend([fx, fy, fz])
-                except: pass
-
-        for line in r.stderr.splitlines():
-            if "RAW_NU" in line:
-                ana_grad_nu = [float(x) for x in line.split()[1:]]
-            if "RAW_DF" in line:
-                ana_grad_df = [float(x) for x in line.split()[1:]]
-
-        # Analytical total = NU + DF (our formula)
-        ana_grad = None
-        if ana_grad_nu and ana_grad_df and len(ana_grad_nu) == len(ana_grad_df):
-            ana_grad = [ana_grad_nu[i] + ana_grad_df[i] for i in range(len(ana_grad_nu))]
-
-        return energy, ana_grad, num_grad
-    except Exception as e:
-        return str(e), None, None
-
-def run_pyscf(atoms_str, basis_name, functional="PBE", use_ecp=False):
-    from pyscf import gto, dft, grad
-
-    atoms = []
-    for a in atoms_str.split(";"):
-        parts = a.split()
-        atoms.append((parts[0], (float(parts[1]), float(parts[2]), float(parts[3]))))
-
-    xc_map = {
-        "PBE": "pbe,pbe", "B3LYP": "b3lyp", "PBE0": "pbe0",
-        "CAM-B3LYP": "cam-b3lyp", "WB97X": "wb97x"
-    }
-
-    mol = gto.M(atom=atoms, basis=basis_name, verbose=0)
-    if use_ecp:
-        mol.ecp = basis_name  # use ECP from basis set
-
-    mf = dft.RKS(mol)
-    mf.xc = xc_map.get(functional, "pbe,pbe")
-    mf = mf.density_fit()
-    mf.max_cycle = 200
-    mf.conv_tol = 1e-8
-
-    try:
-        e = mf.kernel()
-        if not mf.converged:
-            return None, None, False
-
-        # Gradient
-        g = grad.RKS(mf).kernel()
-        grad_flat = g.flatten().tolist()
-
-        return e, grad_flat, True
-    except Exception as ex:
-        return str(ex), None, False
 
 def main():
     print("=" * 70)
@@ -181,91 +65,116 @@ def main():
 
     if not EXE.exists():
         print(f"ERROR: {EXE} not found. Build first.")
-        sys.exit(1)
+        return 1
 
-    # Paths
-    aux_path = DATA / "def2-universal-jkfit.gbs"
-    svp_path = DATA / "def2-svp.gbs"
-    tzvp_path = DATA / "def2-tzvp.gbs"
-    ecp_path = DATA / "def2-svp-ecp.gbs"
+    aux_path = BASIS_DIR / AUX_JSON
+    if not aux_path.exists():
+        print(f"ERROR: missing aux basis {aux_path}")
+        return 1
 
     results = []
-    n_pass = n_fail = n_skip = 0
+    n_pass = n_fail = 0
 
-    for mol_name, atoms_str, func, basis, use_ecp, check_grad in TARGETS:
-        # Create XYZ
-        xyz_path = DATA / f"v_{mol_name}_{func}_{basis}.xyz"
-        make_xyz(atoms_str, xyz_path)
+    for xyz_name, mol_name, func, basis_key, check_grad in TARGETS:
+        xyz_path = MOLECULES_DIR / xyz_name
+        basis_path = BASIS_DIR / BASIS_JSON[basis_key]
+        if not xyz_path.exists() or not basis_path.exists():
+            print(f"  SKIP {mol_name}/{func}/{basis_key} (missing files)")
+            n_fail += 1
+            continue
 
-        # Select basis file
-        bf = svp_path if "SVP" in basis else tzvp_path
-
-        # Run cuEST
         if check_grad:
             cu_e, cu_ana, cu_num = run_cuest_gradient(
-                xyz_path, bf, aux_path, func, use_ecp, ecp_path if use_ecp else None)
+                xyz_path, basis_path, aux_path, func)
         else:
-            cu_e, _ = run_cuest(xyz_path, bf, aux_path, func, use_ecp, ecp_path if use_ecp else None)
+            cu_e, ok = run_cuest_energy(xyz_path, basis_path, aux_path, func)
+            if not ok:
+                cu_e = None
             cu_ana = cu_num = None
 
-        # Run PySCF
-        py_e, py_grad, py_ok = run_pyscf(atoms_str, basis, func, use_ecp)
+        from common import load_xyz
+        atoms = load_xyz(xyz_path)
+        try:
+            py = run_pyscf_df(atoms, str(basis_path), str(aux_path), func)
+        except Exception as ex:
+            py = {"ok": False, "error": str(ex)}
 
-        # Energy check
-        if isinstance(cu_e, float) and py_ok:
+        py_e = py.get("energy") if py.get("ok") else None
+        py_grad = None
+        if check_grad and py.get("ok"):
+            try:
+                from pyscf import grad
+                g = grad.RKS(py["mf"]).kernel()
+                py_grad = g.flatten().tolist()
+            except Exception:
+                py_grad = None
+
+        e_diff = None
+        e_ok = False
+        if is_finite(cu_e) and is_finite(py_e):
             e_diff = abs(cu_e - py_e)
             e_ok = e_diff < 1e-4
-        else:
-            e_diff = None
-            e_ok = False
 
-        # Gradient check
         g_ana_ok = g_num_ok = False
-        g_ana_rms = g_num_rms = None
-
+        g_ana_rms = g_num_rms = g_self_rms = None
         if check_grad and cu_ana is not None and py_grad is not None:
-            ca = np.array(cu_ana); pg = np.array(py_grad)
+            ca = np.array(cu_ana)
+            pg = np.array(py_grad)
             if len(ca) == len(pg):
-                g_ana_rms = np.sqrt(np.mean((ca - pg)**2))
-                g_ana_ok = g_ana_rms < 0.01
-
+                g_ana_rms = float(np.sqrt(np.mean((ca - pg) ** 2)))
+                g_ana_ok = g_ana_rms < 1e-4
         if check_grad and cu_num is not None and py_grad is not None:
-            cn = np.array(cu_num); pg = np.array(py_grad)
+            cn = np.array(cu_num)
+            pg = np.array(py_grad)
             if len(cn) == len(pg):
-                g_num_rms = np.sqrt(np.mean((cn - pg)**2))
-                g_num_ok = g_num_rms < 0.001
+                g_num_rms = float(np.sqrt(np.mean((cn - pg) ** 2)))
+                g_num_ok = g_num_rms < 1e-3
+        if check_grad and cu_ana is not None and cu_num is not None:
+            ca = np.array(cu_ana)
+            cn = np.array(cu_num)
+            if len(ca) == len(cn):
+                g_self_rms = float(np.sqrt(np.mean((ca - cn) ** 2)))
 
-        # Status
-        parts = []
-        parts.append("✅" if e_ok else "❌")
-        parts.append(f"E={cu_e:.8f}" if isinstance(cu_e,float) else f"E=ERR")
-        parts.append(f"dE={e_diff*1000:.3f}mHa" if e_diff else "dE=N/A")
+        passed = e_ok
         if check_grad:
-            parts.append(f"ana={g_ana_rms:.4f}" if g_ana_rms else "ana=N/A")
-            parts.append(f"num={g_num_rms:.4f}" if g_num_rms else "num=N/A")
+            # Gradient must be present and within tolerance when requested
+            passed = e_ok and g_ana_ok and (g_num_ok or cu_num is None)
 
-        label = f"{mol_name:5s}/{func:10s}/{basis:8s}"
-        if use_ecp: label += "(ECP)"
+        parts = [
+            "PASS" if passed else "FAIL",
+            f"E={cu_e:.8f}" if is_finite(cu_e) else "E=ERR",
+            f"dE={e_diff * 1000:.3f}mHa" if e_diff is not None else "dE=N/A",
+        ]
+        if check_grad:
+            parts.append(f"ana={g_ana_rms:.2e}" if g_ana_rms is not None else "ana=N/A")
+            parts.append(f"num={g_num_rms:.2e}" if g_num_rms is not None else "num=N/A")
+            parts.append(f"a-n={g_self_rms:.2e}" if g_self_rms is not None else "a-n=N/A")
+
+        label = f"{mol_name:5s}/{func:10s}/{basis_key:8s}"
         print(f"  {label:40s} {' '.join(parts)}")
 
         results.append({
-            "molecule": mol_name, "functional": func, "basis": basis,
-            "ecp": use_ecp,
-            "energy_ok": e_ok, "energy_diff_mHa": e_diff*1000 if e_diff else None,
+            "molecule": mol_name, "functional": func, "basis": basis_key,
+            "energy_ok": e_ok,
+            "energy_diff_mHa": (e_diff * 1000) if e_diff is not None else None,
             "grad_ana_rms": g_ana_rms, "grad_num_rms": g_num_rms,
+            "grad_self_rms": g_self_rms,
+            "passed": passed,
         })
-
-        if e_ok: n_pass += 1
-        else: n_fail += 1
+        if passed:
+            n_pass += 1
+        else:
+            n_fail += 1
 
     print(f"\n{'=' * 70}")
-    print(f"  Summary: {n_pass} PASS, {n_fail} FAIL, {n_skip} SKIP")
+    print(f"  Summary: {n_pass} PASS, {n_fail} FAIL")
     print(f"{'=' * 70}")
 
-    with open(PROJ / "test" / "results_full.json", "w") as f:
+    with open(PROJ_DIR / "test" / "results_full.json", "w") as f:
         json.dump(results, f, indent=2, default=str)
 
     return 0 if n_fail == 0 else 1
+
 
 if __name__ == "__main__":
     sys.exit(main())

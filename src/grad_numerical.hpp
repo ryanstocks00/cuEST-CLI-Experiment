@@ -93,6 +93,8 @@ inline std::vector<double> numerical_gradient(
             << " --functional " << func_name
             << " --radial-pts " << rad_pts
             << " --angular-pts " << ang_pts
+            << " --charge " << mol.charge()
+            << " --multiplicity " << mol.multiplicity()
             << " --max-iter " << params.max_iter
             << " --conv-thresh " << params.conv_thresh
             << " --quiet";

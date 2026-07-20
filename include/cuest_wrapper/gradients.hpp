@@ -14,20 +14,20 @@
 
 namespace cuest {
 
-// Nuclear repulsion gradient: dEnuc/dR
+// Nuclear repulsion gradient: dEnuc/dR (uses Z_eff for ECP atoms)
 [[nodiscard]] inline std::vector<double> nuc_grad(const Molecule& mol) {
   size_t n = mol.natom();
   std::vector<double> g(3 * n, 0.0);
   for (size_t i = 0; i < n; i++) {
-    double zi = mol.atom(i).atomic_number;
+    double zi = static_cast<double>(mol.zeff(i));
     for (size_t j = i + 1; j < n; j++) {
       double dx = mol.atom(i).x - mol.atom(j).x;
       double dy = mol.atom(i).y - mol.atom(j).y;
       double dz = mol.atom(i).z - mol.atom(j).z;
       double r2 = dx*dx + dy*dy + dz*dz;
-      if (r2 < 1e-20) continue;  // guard against coincident atoms
+      if (r2 < 1e-20) continue;
       double r = std::sqrt(r2);
-      double f = zi * mol.atom(j).atomic_number / (r * r2);
+      double f = zi * static_cast<double>(mol.zeff(j)) / (r * r2);
       g[3*i+0] += f * dx;  g[3*i+1] += f * dy;  g[3*i+2] += f * dz;
       g[3*j+0] -= f * dx;  g[3*j+1] -= f * dy;  g[3*j+2] -= f * dz;
     }
@@ -52,6 +52,7 @@ class GradientComputer {
  public:
   GradientComputer(CuESTContext& ctx, BasisBuilder& basis, DFJKBuilder& dfjk,
                    XCBuilder* xc_builder, ECPIntegrals* ecp_int, const Molecule& mol,
+                   uint64_t nocc,
                    const std::vector<double>& eps, const std::vector<double>& C,
                    const std::vector<double>& D_alpha);
   std::vector<double> compute();
@@ -74,18 +75,21 @@ class GradientComputer {
 inline GradientComputer::GradientComputer(
     CuESTContext& ctx, BasisBuilder& basis, DFJKBuilder& dfjk,
     XCBuilder* xc_builder, ECPIntegrals* ecp_int, const Molecule& mol,
+    uint64_t nocc,
     const std::vector<double>& eps, const std::vector<double>& C,
     const std::vector<double>& D_alpha)
   : ctx_(ctx), basis_(basis), dfjk_(dfjk), xc_builder_(xc_builder), ecp_int_(ecp_int), mol_(mol){
-  nao_=basis.nao(); nocc_=mol.nocc(); natom_=mol.natom();
-  d_Da_.alloc(nao_*nao_*sizeof(double)); cudaMemcpy(d_Da_,D_alpha.data(),nao_*nao_*sizeof(double),cudaMemcpyHostToDevice);
+  nao_=basis.nao(); nocc_=nocc; natom_=mol.natom();
+  d_Da_.alloc(nao_*nao_*sizeof(double));
+  CUDA_CHECK(cudaMemcpy(d_Da_,D_alpha.data(),nao_*nao_*sizeof(double),cudaMemcpyHostToDevice));
   auto W=ewd(eps,C,nao_,nocc_);
-  d_Wa_.alloc(nao_*nao_*sizeof(double)); cudaMemcpy(d_Wa_,W.data(),nao_*nao_*sizeof(double),cudaMemcpyHostToDevice);
+  d_Wa_.alloc(nao_*nao_*sizeof(double));
+  CUDA_CHECK(cudaMemcpy(d_Wa_,W.data(),nao_*nao_*sizeof(double),cudaMemcpyHostToDevice));
   // C_occ: SAME layout as SCF — flat copy of first nocc columns
-  // Shape [nao × nocc], column-major, leading dim = nao (MATCHES SCF convention!)
   std::vector<double> Co(nao_*nocc_);
   for(size_t k=0;k<nocc_;k++)for(size_t i=0;i<nao_;i++) Co[i+k*nao_]=C[i+k*nao_];
-  d_Co_.alloc(nao_*nocc_*sizeof(double)); cudaMemcpy(d_Co_,Co.data(),nao_*nocc_*sizeof(double),cudaMemcpyHostToDevice);
+  d_Co_.alloc(nao_*nocc_*sizeof(double));
+  CUDA_CHECK(cudaMemcpy(d_Co_,Co.data(),nao_*nocc_*sizeof(double),cudaMemcpyHostToDevice));
 }
 
 // Helper: allocate temp workspace, run derivative compute, free temp
@@ -96,15 +100,10 @@ void run_derivative(cuestWorkspaceDescriptor_t& var_buf,
                     QueryFn query, ComputeFn compute) {
   cuestWorkspaceDescriptor_t td{};
   query(&var_buf, &td);
-  void* t = nullptr;
-  if (td.deviceBufferSizeInBytes)
-    cudaMalloc(&t, td.deviceBufferSizeInBytes);
-  cuestWorkspace_t tw = {0, td.hostBufferSizeInBytes,
-                         (uintptr_t)t, td.deviceBufferSizeInBytes};
-  cudaDeviceSynchronize();
-  cuestStatus_t st = compute(&var_buf, &tw);
-  cudaDeviceSynchronize();
-  if (t) cudaFree(t);
+  Workspace temp_ws(td);
+  CUDA_CHECK(cudaDeviceSynchronize());
+  cuestStatus_t st = compute(&var_buf, temp_ws.ptr());
+  CUDA_CHECK(cudaDeviceSynchronize());
   cuestParametersDestroy(ptype, params);
   if (st != CUEST_STATUS_SUCCESS)
     throw std::runtime_error("Gradient derivative compute failed with code " +
@@ -116,12 +115,12 @@ inline std::vector<double> GradientComputer::compute() {
   uint64_t n3 = 3 * natom_;
   nu_ = nuc_grad(mol_);
 
-  AOPairListHandle pl = basis_.create_pair_list();
-  OneElectronIntegrals oe(ctx_, basis_.basis(), pl);
+  const OwnedAOPairList& pl = basis_.pair_list();
+  OneElectronIntegrals oe(ctx_, basis_.basis(), pl.get());
   auto xh = mol_.xyz_host(), ch = mol_.charges_host();
   DeviceArray dx(3 * natom_ * sizeof(double)), dq(natom_ * sizeof(double));
-  cudaMemcpy(dx, xh.data(), 3 * natom_ * sizeof(double), cudaMemcpyHostToDevice);
-  cudaMemcpy(dq, ch.data(), natom_ * sizeof(double), cudaMemcpyHostToDevice);
+  CUDA_CHECK(cudaMemcpy(dx, xh.data(), 3 * natom_ * sizeof(double), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(dq, ch.data(), natom_ * sizeof(double), cudaMemcpyHostToDevice));
 
   DeviceArray d_ov(n3 * sizeof(double)), d_ke(n3 * sizeof(double));
   DeviceArray d_po(n3 * sizeof(double)), d_p2(n3 * sizeof(double));
@@ -133,7 +132,7 @@ inline std::vector<double> GradientComputer::compute() {
   // Overlap: Tr[W * dS/dR]
   {
     cuestOverlapDerivativeComputeParameters_t p;
-    cuestParametersCreate(CUEST_OVERLAPDERIVATIVECOMPUTE_PARAMETERS, &p);
+    CUEST_CHECK(cuestParametersCreate(CUEST_OVERLAPDERIVATIVECOMPUTE_PARAMETERS, &p));
     run_derivative(var_buf, p, CUEST_OVERLAPDERIVATIVECOMPUTE_PARAMETERS,
       [&](auto* /*vb*/, auto* td) {
         cuestOverlapDerivativeComputeWorkspaceQuery(ctx_, oe.plan(), p, td, d_Wa_, nullptr);
@@ -146,7 +145,7 @@ inline std::vector<double> GradientComputer::compute() {
   // Kinetic: Tr[D * dT/dR]
   {
     cuestKineticDerivativeComputeParameters_t p;
-    cuestParametersCreate(CUEST_KINETICDERIVATIVECOMPUTE_PARAMETERS, &p);
+    CUEST_CHECK(cuestParametersCreate(CUEST_KINETICDERIVATIVECOMPUTE_PARAMETERS, &p));
     run_derivative(var_buf, p, CUEST_KINETICDERIVATIVECOMPUTE_PARAMETERS,
       [&](auto* /*vb*/, auto* td) {
         cuestKineticDerivativeComputeWorkspaceQuery(ctx_, oe.plan(), p, td, d_Da_, nullptr);
@@ -159,7 +158,7 @@ inline std::vector<double> GradientComputer::compute() {
   // Potential: Tr[D * dV/dR]
   {
     cuestPotentialDerivativeComputeParameters_t p;
-    cuestParametersCreate(CUEST_POTENTIALDERIVATIVECOMPUTE_PARAMETERS, &p);
+    CUEST_CHECK(cuestParametersCreate(CUEST_POTENTIALDERIVATIVECOMPUTE_PARAMETERS, &p));
     run_derivative(var_buf, p, CUEST_POTENTIALDERIVATIVECOMPUTE_PARAMETERS,
       [&](auto* /*vb*/, auto* td) {
         cuestPotentialDerivativeComputeWorkspaceQuery(ctx_, oe.plan(), p, td, natom_, dx, dq, d_Da_, nullptr, nullptr);
@@ -173,7 +172,7 @@ inline std::vector<double> GradientComputer::compute() {
   if (ecp_int_) {
     DeviceArray d_ecp(n3 * sizeof(double));
     cuestECPDerivativeComputeParameters_t p;
-    cuestParametersCreate(CUEST_ECPDERIVATIVECOMPUTE_PARAMETERS, &p);
+    CUEST_CHECK(cuestParametersCreate(CUEST_ECPDERIVATIVECOMPUTE_PARAMETERS, &p));
     run_derivative(var_buf, p, CUEST_ECPDERIVATIVECOMPUTE_PARAMETERS,
       [&](auto* vb, auto* td) {
         cuestECPDerivativeComputeWorkspaceQuery(ctx_, ecp_int_->plan(), p, vb, td, d_Da_, nullptr);
@@ -197,7 +196,7 @@ inline std::vector<double> GradientComputer::compute() {
     const double* cmat = is_hybrid ? d_Co_.get() : nullptr;
 
     cuestDFSymmetricDerivativeComputeParameters_t p;
-    cuestParametersCreate(CUEST_DFSYMMETRICDERIVATIVECOMPUTE_PARAMETERS, &p);
+    CUEST_CHECK(cuestParametersCreate(CUEST_DFSYMMETRICDERIVATIVECOMPUTE_PARAMETERS, &p));
     run_derivative(var_buf, p, CUEST_DFSYMMETRICDERIVATIVECOMPUTE_PARAMETERS,
       [&](auto* vb, auto* td) {
         cuestDFSymmetricDerivativeComputeWorkspaceQuery(ctx_, dfjk_.plan(), p, vb, td, ds, d_Da_, cs, ncm, &nocc_, cmat, nullptr);
@@ -210,7 +209,7 @@ inline std::vector<double> GradientComputer::compute() {
   // XC derivative
   if (xc_builder_) {
     cuestXCDerivativeRKSComputeParameters_t p;
-    cuestParametersCreate(CUEST_XCDERIVATIVERKSCOMPUTE_PARAMETERS, &p);
+    CUEST_CHECK(cuestParametersCreate(CUEST_XCDERIVATIVERKSCOMPUTE_PARAMETERS, &p));
     run_derivative(var_buf, p, CUEST_XCDERIVATIVERKSCOMPUTE_PARAMETERS,
       [&](auto* vb, auto* td) {
         cuestXCDerivativeRKSComputeWorkspaceQuery(ctx_, xc_builder_->plan(), p, vb, td, nocc_, d_Co_, nullptr);

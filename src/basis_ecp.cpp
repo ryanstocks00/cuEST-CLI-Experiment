@@ -6,6 +6,7 @@
 #include "cuest_wrapper/basis_json.hpp"
 #include <cuda_runtime.h>
 #include <cuest.h>
+#include <algorithm>
 #include <cstdint>
 #include <stdexcept>
 #include <vector>
@@ -15,6 +16,7 @@ namespace cuest {
 void ECPBuilder::build_from_json(const std::string& json_path) {
   BSEJsonReader reader(json_path);
 
+  ecp_electrons_per_atom_.assign(mol_.natom(), 0);
   std::vector<int> atom_to_ecp_idx(mol_.natom(), -1);
   std::vector<JsonECP> ecp_data;
 
@@ -23,7 +25,9 @@ void ECPBuilder::build_from_json(const std::string& json_path) {
     if (reader.has_ecp(Z)) {
       ecp_indices_.push_back(a);
       atom_to_ecp_idx[a] = static_cast<int>(ecp_data.size());
-      ecp_data.push_back(reader.get_ecp(Z));
+      JsonECP ecp = reader.get_ecp(Z);
+      ecp_electrons_per_atom_[a] = static_cast<int>(ecp.n_elec);
+      ecp_data.push_back(std::move(ecp));
     }
   }
 
@@ -33,11 +37,12 @@ void ECPBuilder::build_from_json(const std::string& json_path) {
   has_ecp_ = num_active_ecp_ > 0;
   if (!has_ecp_) return;
 
-  // Build ECP shells
   for (size_t u = 0; u < ecp_data.size(); u++) {
     const auto& ecp = ecp_data[u];
     if (ecp.shell_types.empty()) continue;
 
+    // Validate / sort so shells[i] has angular momentum L == i (cuEST contract).
+    // BSE typically provides ul (max L) first, then L=0..Lmax-1.
     ECPShellHandle top;
     CUEST_CHECK(cuestECPShellCreate(
         static_cast<cuestHandle_t>(ctx_),
@@ -59,12 +64,13 @@ void ECPBuilder::build_from_json(const std::string& json_path) {
     }
   }
 
-  // Create ECP atoms — one per active atom center
   for (size_t a = 0; a < mol_.natom(); a++) {
     int u = atom_to_ecp_idx[a];
     if (u < 0) continue;
 
     const auto& ecp = ecp_data[u];
+    if (ecp.shell_types.empty())
+      throw std::runtime_error("ECP atom has zero shells");
     size_t num_shells = ecp.shell_types.size() - 1;
 
     uint64_t shell_head = 0, top_head = 0;
@@ -92,31 +98,30 @@ void ECPBuilder::build_from_json(const std::string& json_path) {
     ecp_atoms_raw_.push_back(a.get());
 }
 
-ECPIntPlanHandle ECPBuilder::create_ecp_int_plan(cuestAOBasis_t basis,
-                                                   const double* xyz_host) const {
-  ECPIntPlanHandle plan;
+void ECPBuilder::apply_to_molecule(Molecule& mol) const {
+  if (ecp_electrons_per_atom_.size() != mol.natom())
+    throw std::runtime_error("ECP atom count mismatch when applying to molecule");
+  for (size_t a = 0; a < mol.natom(); a++)
+    mol.set_atom_ecp_electrons(a, ecp_electrons_per_atom_[a]);
+}
+
+OwnedECPIntPlan ECPBuilder::create_ecp_int_plan(cuestAOBasis_t basis,
+                                                 const double* xyz_host) const {
+  OwnedECPIntPlan owned;
   cuestWorkspaceDescriptor_t pers_desc{}, temp_desc{};
   ECPIntPlanParams ecp_params;
   CUEST_CHECK(cuestECPIntPlanCreateWorkspaceQuery(
       static_cast<cuestHandle_t>(ctx_), basis, xyz_host,
       num_active_ecp_, ecp_indices_.data(), ecp_atoms_raw_.data(),
-      ecp_params, &pers_desc, &temp_desc, plan.ptr()));
-  void* pd_dev = nullptr;
-  void* td_dev = nullptr;
-  if (pers_desc.deviceBufferSizeInBytes)
-    cudaMalloc(&pd_dev, pers_desc.deviceBufferSizeInBytes);
-  if (temp_desc.deviceBufferSizeInBytes)
-    cudaMalloc(&td_dev, temp_desc.deviceBufferSizeInBytes);
-  cuestWorkspace_t pw = {0, pers_desc.hostBufferSizeInBytes,
-                         (uintptr_t)pd_dev, pers_desc.deviceBufferSizeInBytes};
-  cuestWorkspace_t tw = {0, temp_desc.hostBufferSizeInBytes,
-                         (uintptr_t)td_dev, temp_desc.deviceBufferSizeInBytes};
+      ecp_params, &pers_desc, &temp_desc, owned.plan.ptr()));
+
+  owned.persist = Workspace(pers_desc);
+  Workspace temp_ws(temp_desc);
   CUEST_CHECK(cuestECPIntPlanCreate(
       static_cast<cuestHandle_t>(ctx_), basis, xyz_host,
       num_active_ecp_, ecp_indices_.data(), ecp_atoms_raw_.data(),
-      ecp_params, &pw, &tw, plan.ptr()));
-  if (td_dev) cudaFree(td_dev);
-  return plan;
+      ecp_params, owned.persist.ptr(), temp_ws.ptr(), owned.plan.ptr()));
+  return owned;
 }
 
 }  // namespace cuest

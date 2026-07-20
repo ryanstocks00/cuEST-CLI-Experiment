@@ -20,11 +20,12 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-PROJ_DIR = Path(__file__).resolve().parent.parent
-MOLECULES_DIR = PROJ_DIR / "data" / "molecules"
-BASIS_DIR = PROJ_DIR / "data" / "basis_sets"
-BUILD_DIR = PROJ_DIR / "build"
-EXE = BUILD_DIR / "cuest_dft"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from common import (  # noqa: E402
+    BASIS_DIR, EXE, MOLECULES_DIR, PROJ_DIR,
+    parse_cuest_energy, run_pyscf_df,
+)
+
 RESULTS_FILE = PROJ_DIR / "test" / "validation_results.json"
 
 # ---------------------------------------------------------------------------
@@ -65,23 +66,6 @@ FUNCTIONALS = [
     "M06",
     "M06-2X",
 ]
-
-# PySCF functional name mapping
-PYSCF_XC_MAP = {
-    "PBE": "pbe,pbe",
-    "B3LYP": "b3lyp",
-    "B3LYP5": "b3lyp5",
-    "PBE0": "pbe0",
-    "CAM-B3LYP": "cam-b3lyp",
-    "WB97X-V": "wb97x_v",
-    "WB97M-V": "wb97m_v",
-    "HSE06": "hse06",
-    "M06": "m06",
-    "M06-2X": "m062x",
-    "LC-WPBE": "lc-wpbe",
-    "LC-WPBEH": "lc-wpbeh",
-    "WB97X": "wb97x",
-}
 
 def build_test_matrix(quick=False):
     """Return list of test configurations as dicts."""
@@ -204,33 +188,21 @@ def run_cuest(config, timeout=300):
             "wall_seconds": elapsed,
         }
 
-    # Parse energy and convergence
-    energy = None
-    converged = False
-    for line in result.stdout.splitlines():
-        if "Final SCF energy:" in line:
-            key = "Final SCF energy:"
-            pos = line.find(key)
-            try:
-                energy = float(line[pos + len(key):].strip().split()[0])
-            except (ValueError, IndexError):
-                pass
-        # Check both stdout and stderr for convergence indicators
-        if "SCF converged" in line.lower():
-            converged = True
-        if "Converged:" in line and "Yes" in line:
-            converged = True
-    # If no explicit convergence message but energy was printed without a
-    # "did not converge" warning, assume converged (quiet mode behavior)
-    if not converged:
-        converged = ("WARNING: SCF did not converge" not in result.stdout
-                     and "did not converge" not in result.stderr)
+    energy, converged = parse_cuest_energy(result.stdout + "\n" + result.stderr)
 
     if energy is None:
         return {
             "ok": False,
-            "error": "could not parse energy",
+            "error": "could not parse energy or non-finite energy",
             "stdout_tail": "\n".join(result.stdout.splitlines()[-20:]),
+            "wall_seconds": elapsed,
+        }
+    if not converged:
+        return {
+            "ok": False,
+            "error": "SCF did not converge",
+            "energy": energy,
+            "converged": False,
             "wall_seconds": elapsed,
         }
 
@@ -243,159 +215,43 @@ def run_cuest(config, timeout=300):
 
 
 # ---------------------------------------------------------------------------
-# BSE JSON to PySCF basis converter
-# ---------------------------------------------------------------------------
-
-def bse_json_to_pyscf(basis_path):
-    """Parse a BSE JSON basis file into PySCF format using gto.basis.parse."""
-    import json
-    from pyscf import gto
-
-    with open(basis_path) as f:
-        data = json.load(f)
-
-    _ELEMENTS = [
-        "X",  "H",  "HE", "LI", "BE", "B",  "C",  "N",  "O",  "F",  "NE",
-        "NA", "MG", "AL", "SI", "P",  "S",  "CL", "AR", "K",  "CA",
-        "SC", "TI", "V",  "CR", "MN", "FE", "CO", "NI", "CU", "ZN",
-        "GA", "GE", "AS", "SE", "BR", "KR", "RB", "SR", "Y",  "ZR",
-        "NB", "MO", "TC", "RU", "RH", "PD", "AG", "CD", "IN", "SN",
-        "SB", "TE", "I",  "XE", "CS", "BA", "LA", "CE", "PR", "ND",
-        "PM", "SM", "EU", "GD", "TB", "DY", "HO", "ER", "TM", "YB",
-        "LU", "HF", "TA", "W",  "RE", "OS", "IR", "PT", "AU", "HG",
-        "TL", "PB", "BI", "PO", "AT", "RN", "FR", "RA", "AC", "TH",
-        "PA", "U",  "NP", "PU", "AM", "CM", "BK", "CF", "ES", "FM",
-        "MD", "NO", "LR", "RF", "DB", "SG", "BH", "HS", "MT", "DS",
-        "RG", "CN", "NH", "FL", "MC", "LV", "TS", "OG",
-    ]
-    am_chars = "SPDFGHIKLMNOQR"
-
-    basis_dict = {}
-    ecp_dict = {}
-
-    for z_str, edata in data.get("elements", {}).items():
-        z = int(z_str)
-        if z <= 0 or z >= len(_ELEMENTS):
-            continue
-        symbol = _ELEMENTS[z]
-
-        # --- Electron shells in NWChem format ---
-        shells = edata.get("electron_shells", [])
-        if shells:
-            lines = []
-            for sh in shells:
-                for L in sh["angular_momentum"]:
-                    am = am_chars[L] if L < len(am_chars) else "S"
-                    lines.append(f"{symbol}    {am}")
-                    for p in range(len(sh["exponents"])):
-                        exp = float(sh["exponents"][p])
-                        coeff_strs = [f"{float(ca[p]):.12f}" for ca in sh["coefficients"]]
-                        lines.append(f"    {exp:.12f}  " + "  ".join(coeff_strs))
-            basis_dict[symbol] = gto.basis.parse("\n".join(lines))
-
-        # --- ECP in NWChem format ---
-        ecp_pots = edata.get("ecp_potentials", [])
-        if ecp_pots:
-            nelec = edata.get("ecp_electrons", 0)
-            lines = [f"{symbol} nelec {nelec}"]
-            for pot in ecp_pots:
-                L = pot["angular_momentum"][0]
-                am = am_chars[L].lower() if L < len(am_chars) else "s"
-                lines.append(f"{symbol} {am}-ul")
-                nprim = len(pot["r_exponents"])
-                lines.append(f"  {nprim}")
-                for i in range(nprim):
-                    r = pot["r_exponents"][i]
-                    g = float(pot["gaussian_exponents"][i])
-                    c = float(pot["coefficients"][0][i])
-                    lines.append(f"  {r}  {g:.12f}  {c:.12f}")
-            ecp_dict[symbol] = (nelec, "\n".join(lines))
-
-    return basis_dict, (ecp_dict if ecp_dict else None)
-
-# ---------------------------------------------------------------------------
-# PySCF reference runner
+# PySCF reference runner (density-fitted, same aux JSON as cuEST)
 # ---------------------------------------------------------------------------
 
 def run_pyscf(config):
-    """Compute PySCF reference energy using BSE JSON basis directly."""
+    """Compute PySCF-DF reference energy using the same BSE JSON bases."""
     try:
-        from pyscf import gto, dft
+        from pyscf import gto  # noqa: F401
     except ImportError:
         return {"ok": False, "error": "PySCF not installed"}
 
-    # Read XYZ
     try:
-        with open(config["xyz"]) as f:
-            lines = f.readlines()
-        natom = int(lines[0].strip())
-        atoms = []
-        for line in lines[2:2 + natom]:
-            parts = line.split()
-            if len(parts) >= 4:
-                atoms.append((parts[0], (float(parts[1]), float(parts[2]), float(parts[3]))))
+        from common import load_xyz
+        atoms = load_xyz(config["xyz"])
     except Exception as e:
         return {"ok": False, "error": f"XYZ parse: {e}"}
 
-    # Parse BSE JSON basis → PySCF format
-    try:
-        basis_dict, ecp_data = bse_json_to_pyscf(config["basis"])
-    except Exception as e:
-        return {"ok": False, "error": f"Basis parse: {e}"}
-
-    # Build molecule with custom basis.
-    try:
-        # Parse ECP strings via PySCF's native parser
-        mol_ecp = None
-        if ecp_data:
-            symbols_in_mol = {a[0].upper() for a in atoms}
-            ecp_parsed = {}
-            for s in symbols_in_mol:
-                if s in ecp_data:
-                    nelec, ecp_str = ecp_data[s]
-                    ecp_parsed[s] = (nelec, gto.basis.parse_ecp(ecp_str))
-            if ecp_parsed:
-                mol_ecp = ecp_parsed
-        if mol_ecp:
-            mol = gto.M(atom=atoms, basis=basis_dict, ecp=mol_ecp, verbose=0)
-        else:
-            mol = gto.M(atom=atoms, basis=basis_dict, verbose=0)
-    except Exception as e:
-        return {"ok": False, "error": f"PySCF mol build: {e}"}
-
-    xc = PYSCF_XC_MAP.get(config["functional"], "pbe,pbe")
-
     start = time.time()
     try:
-        mf = dft.RKS(mol)
-        mf.xc = xc
-        mf.max_cycle = 200
-        mf.conv_tol = 1e-10
-        mf.grids.level = 5  # fine grid for accuracy
-        mf.init_guess = '1e'  # core Hamiltonian guess (MINAO fails with custom basis)
-        energy = mf.kernel()
-        converged = mf.converged
-        nelec = mol.nelec
-        if isinstance(nelec, (tuple, list)):
-            nelec = nelec[0] + nelec[1]
-        nocc = nelec // 2
-        homo = float(mf.mo_energy[nocc - 1])
-        lumo = float(mf.mo_energy[nocc])
+        r = run_pyscf_df(
+            atoms, config["basis"], config["aux_basis"],
+            config["functional"], grid_level=3,
+        )
     except Exception as e:
-        return {"ok": False, "error": f"PySCF kernel: {e}"}
+        return {"ok": False, "error": f"PySCF kernel: {e}",
+                "wall_seconds": time.time() - start}
 
     elapsed = time.time() - start
-
-    if not converged:
-        return {"ok": False, "error": "PySCF did not converge", "wall_seconds": elapsed}
-
+    if not r["ok"]:
+        r["wall_seconds"] = elapsed
+        return r
     return {
         "ok": True,
-        "energy": float(energy),
-        "homo": homo,
-        "lumo": lumo,
-        "homo_lumo_gap": lumo - homo,
-        "nelec": nelec,
+        "energy": r["energy"],
+        "homo": r["homo"],
+        "lumo": r["lumo"],
+        "homo_lumo_gap": r["lumo"] - r["homo"],
+        "nelec": r["nelec"],
         "wall_seconds": elapsed,
     }
 
@@ -487,14 +343,14 @@ def run_validation(matrix, results_file, skip_existing=False):
             "pyscf_error": pyscf_r.get("error"),
             "energy_diff_ha": diff_ha,
             "energy_diff_ev": diff_ev,
-            "energy_ok": ok if (cuest_r["ok"] and pyscf_r["ok"]) else None,
+            "energy_ok": bool(ok),
         }
         results.append(result)
 
         if ok:
             n_pass += 1
-        elif cuest_r["ok"] and pyscf_r["ok"]:
-            n_fail += 1
+        else:
+            n_fail += 1  # energy mismatch OR cuEST/PySCF/run error
 
         # Write incrementally (so partial results survive crashes)
         with open(results_file, "w") as f:

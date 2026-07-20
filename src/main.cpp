@@ -65,12 +65,12 @@ static void print_help(const char* prog) {
       << "  --xyz <path>             Input geometry in XYZ format\n"
       << "  --basis <path>           Basis set in BSE JSON format\n\n"
       << "Optional arguments:\n"
-      << "  --aux-basis <path>       Auxiliary/DF (RI-J) basis set (JSON or GBS)\n"
+      << "  --aux-basis <path>       Auxiliary/DF (RI-J) basis set (BSE JSON)\n"
       << "  --functional <name>      XC functional (default: PBE)\n"
       << "  --radial-pts <n>         Radial grid points (default: 75)\n"
       << "  --angular-pts <n>        Angular Lebedev points (default: 302)\n"
       << "  --charge <int>           Total charge (default: 0)\n"
-      << "  --multiplicity <int>     Spin multiplicity (default: 1)\n\n"
+      << "  --multiplicity <int>     Spin multiplicity (default: 1; RKS requires 1)\n\n"
       << "SCF convergence options:\n"
       << "  --max-iter <n>           Max SCF iterations (default: 150)\n"
       << "  --conv-thresh <val>      RMS density convergence (default: 1e-8)\n"
@@ -79,12 +79,14 @@ static void print_help(const char* prog) {
       << "  --diis-space <n>         DIIS subspace dimension (default: 10)\n"
       << "  --damping <val>          Density damping factor (default: 0.0)\n\n"
       << "Other options:\n"
-      << "  --no-df                  Disable density fitting\n"
       << "  --quiet                  Minimal output\n"
       << "  --verbose                Verbose output\n"
       << "  --print-mos              Print final MO energies\n"
       << "  --gradient               Compute and print nuclear gradient\n"
       << "  --help                   Show this help\n\n"
+      << "Notes:\n"
+      << "  Density fitting is required (--aux-basis). Only closed-shell RKS\n"
+      << "  (even electron count, multiplicity 1) is supported.\n\n"
       << "Available functionals:\n"
       << "  PBE B3LYP B3LYP5 PBE0 CAM-B3LYP WB97X-V WB97M-V\n"
       << "  HSE06 M06 M06-2X LC-WPBE LC-WPBEH WB97X\n\n"
@@ -111,7 +113,6 @@ int main(int argc, char* argv[]) {
   int diis_start = 1;
   int diis_space = 10;
   double damping = 0.0;
-  bool use_df = true;
   bool verbose = true;
   bool print_mos = false;
   bool gradient = false;
@@ -152,7 +153,12 @@ int main(int argc, char* argv[]) {
     } else if (arg == "--damping" && i + 1 < argc) {
       damping = std::stod(argv[++i]);
     } else if (arg == "--no-df") {
-      use_df = false;
+      std::cerr << "Error: --no-df is not supported; density fitting is required.\n"
+                << "  Provide --aux-basis with a BSE JSON auxiliary basis.\n";
+      return 1;
+    } else if (arg == "--level-shift") {
+      std::cerr << "Error: --level-shift is not implemented.\n";
+      return 1;
     } else if (arg == "--quiet") {
       quiet = true;
       verbose = false;
@@ -209,16 +215,18 @@ int main(int argc, char* argv[]) {
                         xyz_data.xyz[3 * i + 1],
                         xyz_data.xyz[3 * i + 2]);
     }
+    mol.set_charge(charge);
     mol.set_multiplicity(multiplicity);
 
-    if (charge != 0) {
-      std::cerr << "Warning: Non-zero charge not fully implemented yet.\n";
+    if (multiplicity != 1) {
+      std::cerr << "Error: Only closed-shell RKS (multiplicity=1) is supported.\n";
+      return 1;
     }
 
     if (!quiet) {
       std::cout << "  Atoms: " << mol.natom() << "\n";
-      std::cout << "  Electrons: " << mol.nelec() << "\n";
-      std::cout << "  Multiplicity: " << mol.multiplicity() << "\n\n";
+      std::cout << "  Charge: " << mol.charge() << "\n";
+      std::cout << "  Multiplicity: " << mol.multiplicity() << "\n";
     }
 
     // --- Create cuEST context ---
@@ -232,43 +240,45 @@ int main(int argc, char* argv[]) {
     uint64_t nao = basis_builder.nao();
     if (!quiet) std::cout << "  Basis functions: " << nao << "\n";
 
-    // --- Build auxiliary basis ---
-    AuxBasis* aux_basis_ptr = nullptr;
-    std::unique_ptr<AuxBasis> aux_basis;
-
-    if (use_df) {
-      if (aux_basis_path.empty()) {
-        std::cerr << "Warning: No auxiliary basis specified. "
-                  << "Density fitting requires --aux-basis.\n";
-        use_df = false;
-      } else {
-        if (!quiet) std::cout << "Building auxiliary basis from: " << aux_basis_path << "\n";
-        aux_basis = std::make_unique<AuxBasis>(ctx, mol, /*is_pure=*/1);
-        aux_basis->build_from_json(aux_basis_path);
-        uint64_t naux = ctx.query_nao(aux_basis->basis());
-        if (!quiet) std::cout << "  Auxiliary basis functions: " << naux << "\n";
-        aux_basis_ptr = aux_basis.get();
-      }
+    // --- Build auxiliary basis (required for DF) ---
+    if (aux_basis_path.empty()) {
+      std::cerr << "Error: Density fitting is required.\n"
+                << "  Use --aux-basis with a BSE JSON auxiliary basis.\n";
+      return 1;
     }
+    if (!quiet) std::cout << "Building auxiliary basis from: " << aux_basis_path << "\n";
+    auto aux_basis = std::make_unique<AuxBasis>(ctx, mol, /*is_pure=*/1);
+    aux_basis->build_from_json(aux_basis_path);
+    uint64_t naux = ctx.query_nao(aux_basis->basis());
+    if (!quiet) std::cout << "  Auxiliary basis functions: " << naux << "\n";
 
-    // --- Build ECP from JSON (auto-detected) ---
+    // --- Build ECP from JSON (auto-detected) and apply Z_eff ---
     ECPBuilder* ecp_builder_ptr = nullptr;
     ECPIntegrals* ecp_int_ptr = nullptr;
     std::unique_ptr<ECPBuilder> ecp_builder;
     std::unique_ptr<ECPIntegrals> ecp_int;
-    uint64_t ecp_electrons_removed = 0;
 
     ecp_builder = std::make_unique<ECPBuilder>(ctx, mol);
     ecp_builder->build_from_json(basis_path);
     ecp_builder_ptr = ecp_builder.get();
     if (ecp_builder->has_ecp()) {
-      ecp_electrons_removed = ecp_builder_ptr->total_ecp_electrons();
+      ecp_builder->apply_to_molecule(mol);
       if (!quiet) {
-        std::cout << "  ECP active: " << ecp_electrons_removed
-                  << " core electrons replaced\n";
+        std::cout << "  ECP active: " << ecp_builder->total_ecp_electrons()
+                  << " core electrons replaced (using Z_eff)\n";
       }
     } else if (!quiet) {
       std::cout << "  No ECP atoms found in molecule.\n";
+    }
+
+    if (mol.nelec() < 0 || mol.nelec() % 2 != 0) {
+      std::cerr << "Error: Closed-shell RKS requires a non-negative even electron "
+                << "count (got " << mol.nelec() << " after charge/ECP).\n";
+      return 1;
+    }
+    if (!quiet) {
+      std::cout << "  Electrons (valence): " << mol.nelec() << "\n";
+      std::cout << "  Occupied orbitals: " << mol.nocc() << "\n\n";
     }
 
     // --- Build DFT grid ---
@@ -291,35 +301,26 @@ int main(int argc, char* argv[]) {
     }
 
     // --- Set up DF-JK ---
-    DFJKBuilder* dfjk_ptr = nullptr;
-    std::unique_ptr<DFJKBuilder> dfjk;
+    if (!quiet) std::cout << "Setting up density-fitted J/K builder...\n";
+    auto xyz = mol.xyz_host();
 
-    if (use_df && aux_basis_ptr) {
-      if (!quiet) std::cout << "Setting up density-fitted J/K builder...\n";
-      auto xyz = mol.xyz_host();
-
-      double ex_frac = 1.0, lrc_frac = 0.0, lrc_omega = 0.0;
-      if (functional_name == "CAM-B3LYP") {
-        ex_frac = 0.19; lrc_frac = 0.46; lrc_omega = 0.33;
-      } else if (functional_name == "WB97X" || functional_name == "WB97X-V") {
-        ex_frac = 0.157706; lrc_frac = 0.842294; lrc_omega = 0.3;
-      } else if (functional_name == "WB97M-V") {
-        ex_frac = 0.0; lrc_frac = 1.0; lrc_omega = 0.3;
-      } else if (functional_name == "LC-WPBE" || functional_name == "LC-WPBEH") {
-        ex_frac = 0.0; lrc_frac = 1.0; lrc_omega = 0.4;
-      } else if (functional_name == "HSE06") {
-        ex_frac = 0.25; lrc_frac = -0.25; lrc_omega = 0.11;
-      }
-
-      dfjk = std::make_unique<DFJKBuilder>(
-          ctx, basis_builder.basis(), aux_basis_ptr->basis(),
-          xyz.data(), mol.natom(), ex_frac, lrc_frac, lrc_omega);
-      dfjk_ptr = dfjk.get();
-    } else {
-      std::cerr << "Error: Density fitting is currently required.\n";
-      std::cerr << "  Use --aux-basis to specify an auxiliary basis set.\n";
-      return 1;
+    double ex_frac = 1.0, lrc_frac = 0.0, lrc_omega = 0.0;
+    if (functional_name == "CAM-B3LYP") {
+      ex_frac = 0.19; lrc_frac = 0.46; lrc_omega = 0.33;
+    } else if (functional_name == "WB97X" || functional_name == "WB97X-V") {
+      ex_frac = 0.157706; lrc_frac = 0.842294; lrc_omega = 0.3;
+    } else if (functional_name == "WB97M-V") {
+      ex_frac = 0.0; lrc_frac = 1.0; lrc_omega = 0.3;
+    } else if (functional_name == "LC-WPBE" || functional_name == "LC-WPBEH") {
+      ex_frac = 0.0; lrc_frac = 1.0; lrc_omega = 0.4;
+    } else if (functional_name == "HSE06") {
+      ex_frac = 0.25; lrc_frac = -0.25; lrc_omega = 0.11;
     }
+
+    auto dfjk = std::make_unique<DFJKBuilder>(
+        ctx, basis_builder.basis(), aux_basis->basis(),
+        xyz.data(), mol.natom(), ex_frac, lrc_frac, lrc_omega);
+    DFJKBuilder* dfjk_ptr = dfjk.get();
 
     // --- Set up ECP integrals ---
     if (ecp_builder_ptr && ecp_builder_ptr->has_ecp()) {
@@ -343,7 +344,6 @@ int main(int argc, char* argv[]) {
     scf_params.verbose = verbose;
     scf_params.print_mos = print_mos;
     scf_params.print_level = quiet ? 0 : (verbose ? 2 : 1);
-    scf_params.ecp_electrons = ecp_electrons_removed;
 
     // --- Run SCF ---
     SCFSolver scf(ctx, basis_builder, *dfjk_ptr, &xc,
@@ -356,7 +356,7 @@ int main(int argc, char* argv[]) {
       auto C_host = scf.mo_coefficients_host();
       auto D_host = scf.density_host();
       GradientComputer gc(ctx, basis_builder, *dfjk_ptr, &xc, ecp_int_ptr, mol,
-                          scf.orbital_energies(), C_host, D_host);
+                          scf.nocc(), scf.orbital_energies(), C_host, D_host);
       auto analytical = gc.compute();
 
       if (verbose) {

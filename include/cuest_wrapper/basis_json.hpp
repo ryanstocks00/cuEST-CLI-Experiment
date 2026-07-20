@@ -132,6 +132,9 @@ inline std::vector<JsonShell> BSEJsonReader::get_shells(int atomic_number) const
             js.nprim = nprim;
             js.exponents = shared_exps;  // shared exponents
 
+            if (coeffs.size() != nprim)
+                throw std::runtime_error(
+                    "BSE shell coefficient count mismatch for Z=" + z_str);
             std::vector<double> this_coeffs;
             this_coeffs.reserve(nprim);
             for (size_t i = 0; i < nprim; i++)

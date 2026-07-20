@@ -44,7 +44,7 @@ inline void build_ahlrichs_radial_quadrature(size_t n_points, double radius,
   }
 }
 
-// Ahlrichs radii for elements up to Kr (Z=36)
+// Ahlrichs radii for elements up to Kr (Z=36); default 1.0 beyond.
 inline double ahlrichs_radius(int atomic_number) {
   static const double radii[] = {
       1.00,  // X
@@ -56,11 +56,11 @@ inline double ahlrichs_radius(int atomic_number) {
       1.10, 1.10, 1.00, 0.90, 0.90, 0.90, 0.90  // K-Kr
   };
   if (atomic_number >= 0 && atomic_number <= 36) return radii[atomic_number];
-  return 1.0;  // default for heavy atoms
+  return 1.0;
 }
 
 // ---------------------------------------------------------------------------
-// Grid builder
+// Grid builder — persist workspace must outlive returned MolecularGridHandle
 // ---------------------------------------------------------------------------
 class GridBuilder {
  public:
@@ -68,25 +68,22 @@ class GridBuilder {
               int radial_points = 75, int angular_points = 302)
       : ctx_(ctx), mol_(mol),
         radial_pts_(radial_points), angular_pts_(angular_points) {}
-  ~GridBuilder() { if (grid_persist_dev_) cudaFree(grid_persist_dev_); }
 
   MolecularGridHandle build();
-  void* persist_dev() const { return grid_persist_dev_; }
 
  private:
   CuESTContext& ctx_;
   const Molecule& mol_;
   int radial_pts_;
   int angular_pts_;
-  void* grid_persist_dev_{nullptr};  // kept alive for XC plan
-  cuestWorkspace_t grid_persist_ws_{};
+  Workspace grid_persist_ws_;
 };
 
 inline MolecularGridHandle GridBuilder::build() {
-  // Create per-atom grids
   uint64_t natom = mol_.natom();
   std::vector<cuestAtomGrid_t> atom_grids(natom);
   std::vector<AtomGridHandle> atom_grid_handles;
+  atom_grid_handles.reserve(natom);
 
   std::vector<double> radial_nodes(radial_pts_);
   std::vector<double> radial_weights(radial_pts_);
@@ -97,43 +94,34 @@ inline MolecularGridHandle GridBuilder::build() {
     build_ahlrichs_radial_quadrature(radial_pts_, radius,
                                       radial_nodes, radial_weights);
 
+    AtomGridHandle ag;
     CUEST_CHECK(cuestAtomGridCreate(
         ctx_, radial_pts_,
         radial_nodes.data(), radial_weights.data(),
         angular_pts_per_radial.data(),
-        AtomGridParams{}, &atom_grids[i]));
+        AtomGridParams{}, ag.ptr()));
+    atom_grids[i] = ag.get();
+    atom_grid_handles.push_back(std::move(ag));
   }
 
-  // Create molecular grid
   MolecularGridHandle mol_grid;
   cuestWorkspaceDescriptor_t pers_desc{}, temp_desc{};
-
   auto xyz_h = mol_.xyz_host();
 
   CUEST_CHECK(cuestMolecularGridCreateWorkspaceQuery(
       ctx_, natom, atom_grids.data(), xyz_h.data(),
       MolecularGridParams{}, &pers_desc, &temp_desc, mol_grid.ptr()));
 
-  // KEEP persist workspace alive — XC plan depends on it!
-  void *pdev=nullptr, *tdev=nullptr;
-  if (pers_desc.deviceBufferSizeInBytes) cudaMalloc(&pdev, pers_desc.deviceBufferSizeInBytes);
-  if (temp_desc.deviceBufferSizeInBytes) cudaMalloc(&tdev, temp_desc.deviceBufferSizeInBytes);
-  cuestWorkspace_t pws = {0,pers_desc.hostBufferSizeInBytes,(uintptr_t)pdev,pers_desc.deviceBufferSizeInBytes};
-  cuestWorkspace_t tws = {0,temp_desc.hostBufferSizeInBytes,(uintptr_t)tdev,temp_desc.deviceBufferSizeInBytes};
+  grid_persist_ws_ = Workspace(pers_desc);
+  Workspace temp_ws(temp_desc);
 
   CUEST_CHECK(cuestMolecularGridCreate(
       ctx_, natom, atom_grids.data(), xyz_h.data(),
-      MolecularGridParams{}, &pws, &tws, mol_grid.ptr()));
+      MolecularGridParams{}, grid_persist_ws_.ptr(), temp_ws.ptr(),
+      mol_grid.ptr()));
 
-  // Free temp, KEEP persist
-  if (tdev) cudaFree(tdev);
-  grid_persist_dev_ = pdev;
-  grid_persist_ws_ = pws;
-
-  // Destroy atom grids (molecular grid copies what it needs)
-  for (uint64_t i = 0; i < natom; i++)
-    cuestAtomGridDestroy(atom_grids[i]);
-
+  // Atom grids can be destroyed; molecular grid has what it needs.
+  atom_grid_handles.clear();
   return mol_grid;
 }
 

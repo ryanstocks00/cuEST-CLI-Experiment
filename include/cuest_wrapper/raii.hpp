@@ -10,6 +10,7 @@
  *   - Has factory static methods for standard create/destroy lifecycle
  */
 
+#include <cuda_runtime.h>
 #include <cuest.h>
 
 #include <iostream>
@@ -17,6 +18,7 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace cuest {
 
@@ -33,6 +35,16 @@ inline void check(cuestStatus_t status, const char* expr,
   }
 }
 #define CUEST_CHECK(call) cuest::check((call), #call, __FILE__, __LINE__)
+
+inline void check_cuda(cudaError_t err, const char* expr,
+                       const char* file, int line) {
+  if (err != cudaSuccess) {
+    throw std::runtime_error(std::string("CUDA error: ") + expr + " at " +
+                             file + ":" + std::to_string(line) + " — " +
+                             cudaGetErrorString(err));
+  }
+}
+#define CUDA_CHECK(call) cuest::check_cuda((call), #call, __FILE__, __LINE__)
 
 // ---------------------------------------------------------------------------
 // Forward declarations of parameter wrappers
@@ -236,11 +248,16 @@ class DeviceArray {
   }
 
   void alloc(size_t bytes) {
-    if (ptr_) cudaFree(ptr_);
-    if (cudaMalloc(&ptr_, bytes) != cudaSuccess) {
+    if (ptr_) {
+      cudaFree(ptr_);
+      ptr_ = nullptr;
+    }
+    double* fresh = nullptr;
+    if (cudaMalloc(&fresh, bytes) != cudaSuccess) {
       throw std::runtime_error("Failed to allocate GPU memory (" +
                                std::to_string(bytes) + " bytes)");
     }
+    ptr_ = fresh;
   }
 
   double* get() { return ptr_; }

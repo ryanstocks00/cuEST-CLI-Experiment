@@ -24,18 +24,13 @@ OneElectronIntegrals::OneElectronIntegrals(CuESTContext& ctx,
       oe_params,
       &persistent_desc_, &temp_desc, plan_.ptr()));
 
-  void* oe_tdev = nullptr;
-  if (temp_desc.deviceBufferSizeInBytes) cudaMalloc(&oe_tdev, temp_desc.deviceBufferSizeInBytes);
-  cuestWorkspace_t oe_tws = {0, temp_desc.hostBufferSizeInBytes, (uintptr_t)oe_tdev, temp_desc.deviceBufferSizeInBytes};
-
   persistent_ws_ = Workspace(persistent_desc_);
+  Workspace temp_ws(temp_desc);
 
   CUEST_CHECK(cuestOEIntPlanCreate(
       ctx_, basis, pair_list,
       oe_params,
-      persistent_ws_.ptr(), &oe_tws, plan_.ptr()));
-
-  if (oe_tdev) cudaFree(oe_tdev);
+      persistent_ws_.ptr(), temp_ws.ptr(), plan_.ptr()));
 }
 
 void OneElectronIntegrals::compute_overlap(double* d_S) {
@@ -84,33 +79,22 @@ DFJKBuilder::DFJKBuilder(CuESTContext& ctx, cuestAOBasis_t primary_basis,
                            const double* xyz_host, uint64_t natom,
                            double exchange_frac, double lrc_frac, double lrc_omega)
     : ctx_(ctx) {
-  // Create pair list (must outlive the DF plan)
   {
     cuestWorkspaceDescriptor_t pers_desc{}, temp_desc{};
     AOPairListParams pl_params;
     CUEST_CHECK(cuestAOPairListCreateWorkspaceQuery(
         static_cast<cuestHandle_t>(ctx_), primary_basis, natom, xyz_host,
         1e-14, pl_params, &pers_desc, &temp_desc, pair_list_.ptr()));
-    void* td_dev = nullptr;
-    if (pers_desc.deviceBufferSizeInBytes)
-      cudaMalloc(&pair_list_persist_dev_, pers_desc.deviceBufferSizeInBytes);
-    if (temp_desc.deviceBufferSizeInBytes)
-      cudaMalloc(&td_dev, temp_desc.deviceBufferSizeInBytes);
-    cuestWorkspace_t pw = {0, pers_desc.hostBufferSizeInBytes,
-                           (uintptr_t)pair_list_persist_dev_,
-                           pers_desc.deviceBufferSizeInBytes};
-    cuestWorkspace_t tw = {0, temp_desc.hostBufferSizeInBytes,
-                           (uintptr_t)td_dev, temp_desc.deviceBufferSizeInBytes};
+    pair_list_persist_ = Workspace(pers_desc);
+    Workspace temp_ws(temp_desc);
     CUEST_CHECK(cuestAOPairListCreate(
         static_cast<cuestHandle_t>(ctx_), primary_basis, natom, xyz_host,
-        1e-14, pl_params, &pw, &tw, pair_list_.ptr()));
-    if (td_dev) cudaFree(td_dev);
+        1e-14, pl_params, pair_list_persist_.ptr(), temp_ws.ptr(),
+        pair_list_.ptr()));
   }
 
-  // Create DF plan with exchange parameters for hybrid/LRC functionals
   {
     DFIntPlanParams df_params;
-    // Configure exchange parameters
     cuestParametersConfigure(CUEST_DFINTPLAN_PARAMETERS, df_params,
         CUEST_DFINTPLAN_PARAMETERS_EXCHANGE_FRACTION, &exchange_frac, sizeof(double));
     cuestParametersConfigure(CUEST_DFINTPLAN_PARAMETERS, df_params,
@@ -122,29 +106,20 @@ DFJKBuilder::DFJKBuilder(CuESTContext& ctx, cuestAOBasis_t primary_basis,
     CUEST_CHECK(cuestDFIntPlanCreateWorkspaceQuery(
         static_cast<cuestHandle_t>(ctx_), primary_basis, aux_basis,
         pair_list_.get(), df_params, &pers_desc, &temp_desc, plan_.ptr()));
-    void* td_dev = nullptr;
-    if (pers_desc.deviceBufferSizeInBytes)
-      cudaMalloc(&plan_persist_dev_, pers_desc.deviceBufferSizeInBytes);
-    if (temp_desc.deviceBufferSizeInBytes)
-      cudaMalloc(&td_dev, temp_desc.deviceBufferSizeInBytes);
-    cuestWorkspace_t pw = {0, pers_desc.hostBufferSizeInBytes,
-                           (uintptr_t)plan_persist_dev_,
-                           pers_desc.deviceBufferSizeInBytes};
-    cuestWorkspace_t tw = {0, temp_desc.hostBufferSizeInBytes,
-                           (uintptr_t)td_dev, temp_desc.deviceBufferSizeInBytes};
+    plan_persist_ = Workspace(pers_desc);
+    Workspace temp_ws(temp_desc);
     CUEST_CHECK(cuestDFIntPlanCreate(
         static_cast<cuestHandle_t>(ctx_), primary_basis, aux_basis,
-        pair_list_.get(), df_params, &pw, &tw, plan_.ptr()));
-    if (td_dev) cudaFree(td_dev);
+        pair_list_.get(), df_params, plan_persist_.ptr(), temp_ws.ptr(),
+        plan_.ptr()));
   }
 }
 
 DFJKBuilder::~DFJKBuilder() {
-  // plan_ must be destroyed before pair_list_ (plan depends on pair_list)
+  // Destroy handles before persist workspaces (members would also do this
+  // if declaration order is correct; be explicit for clarity).
   plan_.reset();
   pair_list_.reset();
-  if (plan_persist_dev_) cudaFree(plan_persist_dev_);
-  if (pair_list_persist_dev_) cudaFree(pair_list_persist_dev_);
 }
 
 void DFJKBuilder::compute_J(const double* d_D, double* d_J) {
@@ -178,8 +153,6 @@ void DFJKBuilder::compute_K(uint64_t nocc, const double* d_Cocc, double* d_K,
 // XCBuilder
 // ---------------------------------------------------------------------------
 cuestXCIntPlanParametersFunctional_t XCBuilder::to_cuest_functional(int id) {
-  // Map our internal IDs to cuEST cuestXCIntPlanParametersFunctional_t
-  // Values from cuest_parameter_types.h
   switch (id) {
     case XC_PBE:      return CUEST_XCINTPLAN_PARAMETERS_FUNCTIONAL_PBE;
     case XC_B3LYP:    return CUEST_XCINTPLAN_PARAMETERS_FUNCTIONAL_B3LYP1;
@@ -211,27 +184,14 @@ XCBuilder::XCBuilder(CuESTContext& ctx, cuestAOBasis_t basis,
       xc_params,
       &pers_desc, &temp_desc, plan_.ptr()));
 
-  void* xc_pp_dev = nullptr, *xc_tp_dev = nullptr;
-  if (pers_desc.deviceBufferSizeInBytes) cudaMalloc(&xc_pp_dev, pers_desc.deviceBufferSizeInBytes);
-  if (temp_desc.deviceBufferSizeInBytes) cudaMalloc(&xc_tp_dev, temp_desc.deviceBufferSizeInBytes);
-  cuestWorkspace_t xc_pp_ws = {0, pers_desc.hostBufferSizeInBytes,
-                                (uintptr_t)xc_pp_dev, pers_desc.deviceBufferSizeInBytes};
-  cuestWorkspace_t xc_tp_ws = {0, temp_desc.hostBufferSizeInBytes,
-                                (uintptr_t)xc_tp_dev, temp_desc.deviceBufferSizeInBytes};
+  xc_persist_ws_ = Workspace(pers_desc);
+  Workspace temp_ws(temp_desc);
 
   CUEST_CHECK(cuestXCIntPlanCreate(
       ctx_, basis, mol_grid_,
       to_cuest_functional(functional_id),
       xc_params,
-      &xc_pp_ws, &xc_tp_ws, plan_.ptr()));
-
-  // KEEP persist alive for compute!
-  xc_persist_dev_ = xc_pp_dev; xc_pp_dev = nullptr;
-  if (xc_tp_dev) cudaFree(xc_tp_dev);  // temp can be freed
-}
-
-XCBuilder::~XCBuilder() {
-  if (xc_persist_dev_) cudaFree(xc_persist_dev_);
+      xc_persist_ws_.ptr(), temp_ws.ptr(), plan_.ptr()));
 }
 
 void XCBuilder::compute_vxc_rks(uint64_t nocc, const double* d_Cocc,
@@ -249,15 +209,12 @@ void XCBuilder::compute_vxc_rks(uint64_t nocc, const double* d_Cocc,
       &var_buf, &temp_desc,
       nocc, d_Cocc, exc, d_Vxc));
 
-  void* tdev=nullptr;
-  if(temp_desc.deviceBufferSizeInBytes)cudaMalloc(&tdev,temp_desc.deviceBufferSizeInBytes);
-  cuestWorkspace_t tws={0,temp_desc.hostBufferSizeInBytes,(uintptr_t)tdev,temp_desc.deviceBufferSizeInBytes};
+  Workspace temp_ws(temp_desc);
   CUEST_CHECK(cuestXCPotentialRKSCompute(
       ctx_, plan_,
       xc_comp_params,
-      &var_buf, &tws,
+      &var_buf, temp_ws.ptr(),
       nocc, d_Cocc, exc, d_Vxc));
-  if(tdev)cudaFree(tdev);
 }
 
 void XCBuilder::compute_vxc_uks(uint64_t nocc_a, uint64_t nocc_b,

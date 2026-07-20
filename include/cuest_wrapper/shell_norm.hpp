@@ -52,6 +52,8 @@ inline std::vector<double> compute_normalized_coefficients(
             coeff_norm[i] * coeff_norm[j];
     }
   }
+  if (Q <= 0.0 || !std::isfinite(Q))
+    throw std::runtime_error("Degenerate contraction (Q <= 0) in shell normalization");
   Q = std::pow(Q, -0.5) * std::sqrt(normalization);
 
   for (size_t i = 0; i < num_primitives; i++) coeff_norm[i] *= Q;

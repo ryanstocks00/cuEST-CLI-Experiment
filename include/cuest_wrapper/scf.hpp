@@ -24,11 +24,9 @@ struct SCFParams {
   int diis_start{1};
   int diis_max_space{10};
   double damping{0.0};
-  double level_shift{0.0};
   bool verbose{true};
   bool print_mos{false};
   int print_level{2};
-  uint64_t ecp_electrons{0};     // core electrons removed by ECP
 };
 
 class SCFSolver {
@@ -73,7 +71,7 @@ class SCFSolver {
   BasisBuilder& basis_;
   DFJKBuilder& dfjk_;
   XCBuilder* xc_;
-  ECPBuilder* ecp_builder_;
+  ECPBuilder* ecp_builder_;  // retained for API/future use
   ECPIntegrals* ecp_int_;
   const Molecule& mol_;
   SCFParams params_;
