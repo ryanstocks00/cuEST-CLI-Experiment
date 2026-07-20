@@ -1,16 +1,16 @@
 # cuEST DFT — GPU-Accelerated Quantum Chemistry
 
-A C++ DFT package built on [NVIDIA cuEST](https://developer.nvidia.com/cuda/cuda-x-libraries/cuest) (v0.2.0) with RAII wrappers, DIIS convergence acceleration, analytical gradients, and PySCF-validated energies.
+A C++ DFT package built on [NVIDIA cuEST](https://developer.nvidia.com/cuda/cuda-x-libraries/cuest) (v0.2.0) with RAII wrappers, analytic gradients, and PySCF-validation.
 
 ## Features
 
-- **Full SCF**: RKS (Restricted Kohn-Sham) with density fitting (RI-J)
+- **Full SCF**: RKS (Restricted Kohn-Sham) with density fitting (RI-JK)
 - **DIIS**: Direct inversion in iterative subspace, configurable space and start
-- **Gradients**: Analytical (fast) and numerical (validated reference)
+- **Gradients**: Analytic or numerical finite differences
 - **Functionals**: PBE, B3LYP, B3LYP5, PBE0, CAM-B3LYP, ωB97X, ωB97X-V, ωB97M-V, HSE06, M06, M06-2X, LC-ωPBE, LC-ωPBEh
-- **ECP support**: Effective core potentials with Z_eff nuclear charges
+- **ECP support**: Effective core potentials
 - **C++ RAII**: Memory-safe wrappers around the cuEST C API
-- **Validated**: SCF energies match PySCF-DF to ~0.0016 mHa (light systems)
+- **Validated**: SCF energies match PySCF-DF to ~0.01 mHa (light systems)
 
 ## Requirements
 
@@ -36,25 +36,36 @@ ln -sf libcuest.so.0.2.0 external/libcuest.so
 ### 2. Build
 
 ```bash
-cmake -B build -S . -DCMAKE_CUDA_ARCHITECTURES="80;86;90"
+cmake -B build -S . -DCMAKE_CUDA_ARCHITECTURES="80;89;90"
 cmake --build build -j$(nproc)
 ```
 
 ### 3. Basis sets
 
-BSE JSON bases are already under `data/basis_sets/`. To refresh from
-[Basis Set Exchange](https://www.basissetexchange.org/):
+BSE JSON bases live under `data/basis_sets/`. Refresh / fetch missing files with:
 
 ```bash
-# Example:
-curl -sL "https://www.basissetexchange.org/api/basis/def2-svp/format/json/" \
-  -o data/basis_sets/def2-svp.json
+python3 test/download_bases.py
 ```
 
-Required for the smoke test:
-- `data/basis_sets/def2-svp.json`
-- `data/basis_sets/def2-universal-jkfit.json`
-- `data/molecules/h2o.xyz`
+Orbital ↔ auxiliary pairings used by the validators (`test/common.py`):
+
+| Orbital | Auxiliary |
+|---------|-----------|
+| STO-3G, 6-31G, 6-31G* | def2-universal-jkfit |
+| def2-SVP / TZVP / SVPD / QZVPP | def2-universal-jkfit |
+| cc-pVDZ / VTZ / VQZ | matching `cc-pV*Z-rifit` |
+
+Default `test/reference.json` matrix: all molecules × {PBE, WB97X} × all
+bases × {spherical, Cartesian} orbitals, with SCF iteration counts.
+Gradients are stored for spherical-orbital refs only (analytic DF). The DF auxiliary basis is always spherical (cuEST requirement;
+`--cartesian` applies to the primary basis only). Regenerate with:
+
+```bash
+python3 test/generate_reference.py
+python3 test/generate_reference.py --shell cartesian --merge
+python3 test/validate_cuest.py
+```
 
 ### 4. Run
 
@@ -111,21 +122,10 @@ Available functionals:
 
 ## Validation
 
-### Smoke test
-
-```bash
-./run_test.sh
-# or:
-python3 test/test_water.py
-```
-
 ### Energy matrix vs PySCF-DF
 
 ```bash
-python3 test/generate_reference.py --quick
 python3 test/validate_cuest.py --functional PBE
-# or live side-by-side:
-python3 test/validate_energy.py --quick
 ```
 
 ### Gradients
@@ -138,12 +138,11 @@ python3 test/validate_full.py
 
 | Functional | cuEST (Ha) | PySCF-DF (Ha) | Diff (mHa) |
 |---|---|---|---|
-| PBE | -76.272118134684 | -76.272119814659 | 0.0017 |
-| PBE0 | -76.276300063073 | -76.276301390574 | 0.0013 |
-| B3LYP | -76.358199745106 | -76.358201309091 | 0.0016 |
+| PBE | -76.2721181 | -76.2721198 | 0.0017 |
+| PBE0 | -76.2763001 | -76.2763014 | 0.0013 |
+| B3LYP | -76.3581997 | -76.3582013 | 0.0016 |
 
-All functionals agree within 0.0017 mHa (0.05 meV) — essentially
-machine-precision agreement given different grid implementations.
+All functionals agree within 0.0017 mHa (0.05 meV)
 
 ### Gradient
 
@@ -153,37 +152,39 @@ dE/dR = -nu + 2*(ke + po + pc) - 2*ov + df + xc
 ```
 where `nu`=nuclear, `ke`=kinetic, `po`/`pc`=potential (basis/charge centers),
 `ov`=overlap, `df`=DF Coulomb+exchange, `xc`=exchange-correlation.
-The charge-center potential derivative (`pc`) is essential for translational invariance.
-Agreement with numerical finite-difference and PySCF reference gradients is
-< 1e-5 Ha/bohr for PBE, B3LYP, PBE0, and CAM-B3LYP.
+Agreement with numerical finite-difference and PySCF reference gradients is < 1e-5 Ha/bohr for PBE, B3LYP, PBE0, and CAM-B3LYP.
 
 ## Architecture
 
 ```
-include/cuest_wrapper/
-├── raii.hpp          # C++ RAII wrappers for cuEST handles
-├── context.hpp       # cuEST context management
-├── molecule.hpp      # Molecular geometry + Z_eff / charge
-├── parsers.hpp       # XYZ file parsers
-├── shell_norm.hpp    # Gaussian basis normalization
-├── basis.hpp         # BasisBuilder, AuxBasis, ECPBuilder
-├── integrals.hpp     # 1e, DF-J, XC, ECP integral wrappers
-├── grid.hpp          # DFT integration grid (Becke+Ahlrichs)
-├── scf.hpp           # SCF solver with DIIS + cuSOLVER diagonalization
-└── gradients.hpp     # Analytical gradient (6 cuEST derivative APIs)
+cuest_wrapper/                 # Standalone RAII library (STATIC)
+├── include/cuest_wrapper/
+│   ├── raii.hpp               # C++ RAII wrappers for cuEST handles
+│   ├── context.hpp            # cuEST context management
+│   ├── molecule.hpp           # Molecular geometry + Z_eff / charge
+│   ├── parsers.hpp            # XYZ file parsers
+│   ├── shell_norm.hpp         # Gaussian basis normalization
+│   ├── basis.hpp / basis_json.hpp
+│   ├── integrals.hpp          # 1e, DF-J, XC, ECP integral wrappers
+│   ├── grid.hpp               # DFT integration grid (Becke+Ahlrichs)
+│   ├── scf.hpp                # SCF solver with DIIS + cuSOLVER
+│   └── gradients.hpp          # Analytical gradient APIs
+└── src/
+    ├── basis_nvidia.cpp       # BasisBuilder / AuxBasis from BSE JSON
+    ├── basis_ecp.cpp          # ECPBuilder implementation
+    ├── integrals.cpp
+    └── scf.cpp
 
-src/
-├── main.cpp          # CLI entry point
-├── basis_nvidia.cpp  # BasisBuilder from BSE JSON
-├── basis_ecp.cpp     # ECPBuilder implementation
-├── integrals.cpp     # Integral computation implementations
-└── scf.cpp           # SCF loop with cuSOLVER dsygvd
+src/                           # CLI driver
+├── main.cpp                   # cuest_dft entry point
+└── grad_numerical.hpp         # FD gradients via subprocess
 
 test/
-├── common.py         # Shared BSE→PySCF, parsers, runners
-├── test_water.py     # H2O smoke test
-├── validate_energy.py
-├── validate_full.py
-├── generate_reference.py
-└── validate_cuest.py
+├── common.py                  # Shared BSE→PySCF, parsers, runners
+├── download_bases.py          # Fetch orbital/aux bases from BSE
+├── generate_reference.py      # Build test/reference.json (PySCF-DF)
+├── validate_cuest.py          # Compare cuEST vs reference.json
+├── validate_energy.py         # Live side-by-side energy matrix
+├── validate_full.py           # Gradient spot checks
+└── test_water.py              # H2O smoke test
 ```

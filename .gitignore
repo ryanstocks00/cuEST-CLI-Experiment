@@ -1,39 +1,24 @@
+# Build
 build/
 *.o
 *.so
 *.a
+
+# Local cuEST install (not vendored in git)
 external/libcuest*
 external/cuest_include/
-temp_samples/
-/tmp/
-test_minimal*
-test_wrapper*
-test_dfjk*
-test_full_df*
-*.xyz~
-*.gbs~
-.DS_Store
-run_test.sh
-src/main_simple.cpp
-src/grad_unit_test*
-src/grad_xc_test*
-src/nvidia_df_wrapper.c
-src/df_wrapper.h
-test_dfjk*
-test_full_df*
-test_minimal*
-test_wrapper*
-data/ch2i2.xyz
-data/def2-svpd.gbs
-data/test_*.xyz
+
+# Python
 *.pyc
 __pycache__/
-# JSON basis files are tracked in data/
-# PySCF reference energies are tracked (test/reference.json).
-# cuEST validation run outputs are regenerated locally — do not track.
+
+# Regenerated validation outputs
 test/cuest_results.json
 test/results_full.json
 test/validation_results.json
 test/validation*.json
 test/cuest_*.log
-test/*.pyc
+
+# Editor / OS
+.DS_Store
+*~

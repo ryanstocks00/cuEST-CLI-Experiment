@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-Validate cuEST DFT energies against a PySCF reference file.
+Validate cuEST DFT against a PySCF reference file.
+
+Compares energy and SCF iteration count. Analytic gradients are compared when
+the reference provides them (spherical-orbital refs). Cartesian refs are
+energy-only.
 
 Usage:
-    # First, generate the reference:
     python3 test/generate_reference.py
-
-    # Then validate cuEST against it:
-    python3 test/validate_cuest.py                    # all configs
-    python3 test/validate_cuest.py --molecule H2O     # single molecule
-    python3 test/validate_cuest.py --functional PBE   # single functional
+    python3 test/validate_cuest.py
+    python3 test/validate_cuest.py --molecule H2O --shell cartesian
 """
 
 import json
+import math
 import os
 import subprocess
 import sys
@@ -20,18 +21,25 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import AUX_JSON, BASIS_DIR, EXE, PROJ_DIR, parse_cuest_energy  # noqa: E402
+from common import (  # noqa: E402
+    BASIS_DIR, BASIS_SETS, EXE, PROJ_DIR, as_grad_nx3, aux_json_for,
+    aux_json_from_label, aux_label_for, flatten_grad, is_finite,
+    parse_cuest_energy, parse_cuest_scf_iterations, parse_gradient_block,
+)
 
 REFERENCE_FILE = PROJ_DIR / "test" / "reference.json"
 RESULTS_FILE = PROJ_DIR / "test" / "cuest_results.json"
 
 
-# ---------------------------------------------------------------------------
-# cuEST runner
-# ---------------------------------------------------------------------------
+def run_cuest(config, timeout=600):
+    """Run cuEST DFT and return parsed results.
 
-def run_cuest(config, aux_path, timeout=300):
-    """Run cuEST DFT and return parsed energy dict."""
+    Requests an analytic gradient only when the config asks for it (spherical
+    refs). Cartesian validation is energy-only.
+    """
+    aux_path = config.get("aux_basis") or str(BASIS_DIR / aux_json_for(config["basis_label"]))
+    shell = config.get("shell", "spherical")
+    want_grad = config.get("check_gradient", shell == "spherical")
     cmd = [
         str(EXE),
         "--xyz", config["xyz"],
@@ -42,7 +50,10 @@ def run_cuest(config, aux_path, timeout=300):
         "--conv-thresh", "1e-8",
         "--energy-conv", "1e-8",
         "--quiet",
+        "--cartesian" if shell == "cartesian" else "--spherical",
     ]
+    if want_grad:
+        cmd.append("--analytic-gradient")
 
     start = time.time()
     try:
@@ -56,36 +67,61 @@ def run_cuest(config, aux_path, timeout=300):
         return {"ok": False, "error": str(e), "wall_s": time.time() - start}
 
     elapsed = time.time() - start
+    text = result.stdout + "\n" + result.stderr
 
     if result.returncode != 0:
         return {"ok": False, "error": f"exit {result.returncode}",
                 "stderr": "\n".join(result.stderr.splitlines()[-5:]),
                 "wall_s": elapsed}
 
-    energy, converged = parse_cuest_energy(result.stdout + "\n" + result.stderr)
-
+    energy, converged = parse_cuest_energy(text)
     if energy is None:
         return {"ok": False, "error": "could not parse energy or non-finite", "wall_s": elapsed}
     if not converged:
         return {"ok": False, "error": "SCF did not converge", "energy_ha": energy,
                 "converged": False, "wall_s": elapsed}
 
-    return {"ok": True, "energy_ha": energy, "converged": converged, "wall_s": elapsed}
+    scf_iterations = parse_cuest_scf_iterations(text)
+    grad = parse_gradient_block(text, "Analytical Gradient")
+    if grad is not None:
+        grad = as_grad_nx3(grad)
+        if not all(is_finite(x) for row in grad for x in row):
+            grad = None
+
+    return {
+        "ok": True,
+        "energy_ha": energy,
+        "converged": converged,
+        "scf_iterations": scf_iterations,
+        "gradient_ha_bohr": grad,
+        "wall_s": elapsed,
+    }
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+def grad_rms(a, b):
+    fa, fb = flatten_grad(a), flatten_grad(b)
+    if fa is None or fb is None or len(fa) != len(fb) or not fa:
+        return None
+    return math.sqrt(sum((x - y) ** 2 for x, y in zip(fa, fb)) / len(fa))
+
 
 def main():
     import argparse
     p = argparse.ArgumentParser(description="Validate cuEST against PySCF reference")
-    p.add_argument("--reference", type=str, default=str(REFERENCE_FILE),
-                   help="Path to reference JSON")
+    p.add_argument("--reference", type=str, default=str(REFERENCE_FILE))
     p.add_argument("--molecule", type=str)
     p.add_argument("--functional", type=str)
+    p.add_argument("--basis", type=str)
+    p.add_argument("--shell", type=str, choices=["spherical", "cartesian"])
+    p.set_defaults(density_fitting=None)
+    p.add_argument("--df", dest="density_fitting", action="store_const", const=True,
+                   help="Only density-fitted references")
+    p.add_argument("--exact", dest="density_fitting", action="store_const", const=False,
+                   help="Only non-DF (exact integral) references")
     p.add_argument("--tolerance-ha", type=float, default=1e-4,
-                   help="Max energy difference in Ha (default: 1e-4 = 0.1 mHa)")
+                   help="Max |ΔE| in Ha (default: 1e-4)")
+    p.add_argument("--grad-tol", type=float, default=1e-4,
+                   help="Max RMS |Δg| in Ha/bohr (default: 1e-4)")
     args = p.parse_args()
 
     if not EXE.exists():
@@ -106,35 +142,21 @@ def main():
     print(f"Loaded {len(references)} references from {ref_path}")
     print(f"Generated: {ref_data.get('generated', 'unknown')}")
 
-    # Build aux path lookup
-    aux_path = str(BASIS_DIR / AUX_JSON)
-
-    # Filter references by molecule/functional
     refs = references
     if args.molecule:
         refs = [r for r in refs if r["molecule"] == args.molecule]
     if args.functional:
         refs = [r for r in refs if r["functional"] == args.functional]
-
-    # Build molecule -> xyz path lookup
-    mol_xyz = {}
-    for f in (PROJ_DIR / "data" / "molecules").glob("*.xyz"):
-        # map molecule names to xyz files
-        pass  # we look up by molecule label below
-
-    # Map molecule label -> basis path (from generate_reference.py config)
-    def get_basis_path(ref):
-        """Infer basis path from reference entry."""
-        bs_map = {
-            "def2SVP": "def2-svp.json", "def2TZVP": "def2-tzvp.json",
-            "def2SVPD": "def2-svpd.json", "cc-pVDZ": "cc-pvdz.json",
-            "cc-pVTZ": "cc-pvtz.json",
-        }
-        bs_file = bs_map.get(ref["basis_label"], "def2-svp.json")
-        return str(PROJ_DIR / "data" / "basis_sets" / bs_file)
+    if args.basis:
+        refs = [r for r in refs if r["basis_label"] == args.basis]
+    if args.shell:
+        refs = [r for r in refs if r.get("shell", "spherical") == args.shell]
+    if args.density_fitting is True:
+        refs = [r for r in refs if r.get("density_fitting", True)]
+    elif args.density_fitting is False:
+        refs = [r for r in refs if not r.get("density_fitting", True)]
 
     def get_xyz_path(mol_label):
-        """Map molecule label to xyz file."""
         name_map = {
             "H2O": "h2o.xyz", "NH3": "nh3.xyz", "H2": "h2.xyz",
             "HF": "hf.xyz", "N2": "n2.xyz", "CO2": "co2.xyz",
@@ -145,19 +167,34 @@ def main():
         fname = name_map.get(mol_label, f"{mol_label.lower()}.xyz")
         return str(PROJ_DIR / "data" / "molecules" / fname)
 
-    # Build test list from references directly
     testable = []
     for ref in refs:
+        if "energy_ha" not in ref:
+            continue
         xyz = get_xyz_path(ref["molecule"])
-        basis = get_basis_path(ref)
-        if not Path(xyz).exists() or not Path(basis).exists():
+        bs = BASIS_SETS.get(ref["basis_label"])
+        if not bs:
+            continue
+        basis = str(BASIS_DIR / bs["basis"])
+        df = bool(ref.get("density_fitting", True))
+        if not df:
+            continue
+        aux_label = ref.get("aux_basis_label") or aux_label_for(ref["basis_label"])
+        aux = str(BASIS_DIR / aux_json_from_label(aux_label))
+        if not Path(xyz).exists() or not Path(basis).exists() or not Path(aux).exists():
             continue
         testable.append({
             "molecule": ref["molecule"],
             "functional": ref["functional"],
             "basis_label": ref["basis_label"],
+            "shell": ref.get("shell", "spherical"),
+            "density_fitting": df,
+            "aux_basis_label": aux_label,
             "xyz": xyz,
             "basis": basis,
+            "aux_basis": aux,
+            "check_gradient": ref.get("gradient_ha_bohr") is not None,
+            "ref": ref,
         })
 
     if not testable:
@@ -167,35 +204,47 @@ def main():
     print(f"\nTesting {len(testable)} configurations...\n")
 
     results = []
-    n_pass, n_fail, n_error = 0, 0, 0
+    n_pass = n_fail = n_error = 0
 
     for i, config in enumerate(testable):
-        label = f"{config['molecule']}/{config['functional']}/{config['basis_label']}"
-        # Find matching reference
-        ref = next((r for r in refs if r["molecule"] == config["molecule"]
-                    and r["functional"] == config["functional"]
-                    and r["basis_label"] == config["basis_label"]), None)
-
-        if not ref or not ref.get("ok"):
-            print(f"[{i+1}/{len(testable)}] {label} — SKIP (ref failed: {ref.get('error','?') if ref else 'missing'})")
-            results.append({**config, "ref_ok": False, "ref_error": ref.get("error") if ref else "missing"})
-            n_error += 1
-            continue
-
+        ref = config["ref"]
+        label = (f"{config['molecule']}/{config['functional']}/"
+                 f"{config['basis_label']}/{config['shell']}"
+                 f"/df:{config['aux_basis_label']}")
         print(f"[{i+1}/{len(testable)}] {label} ...", end=" ", flush=True)
-        cuest_r = run_cuest(config, aux_path)
+        cuest_r = run_cuest(config)
 
         if not cuest_r["ok"]:
             print(f"FAILED: {cuest_r['error']}")
-            results.append({**config, "cuest_ok": False, "cuest_error": cuest_r["error"],
-                           "ref_energy_ha": ref["energy_ha"]})
+            results.append({**{k: config[k] for k in
+                               ("molecule", "functional", "basis_label", "shell")},
+                            "cuest_ok": False, "cuest_error": cuest_r["error"],
+                            "ref_energy_ha": ref["energy_ha"]})
             n_error += 1
             continue
 
         diff = cuest_r["energy_ha"] - ref["energy_ha"]
-        passed = abs(diff) < args.tolerance_ha
+        energy_ok = abs(diff) < args.tolerance_ha
+
+        g_rms = grad_rms(cuest_r.get("gradient_ha_bohr"),
+                         ref.get("gradient_ha_bohr"))
+        grad_ok = g_rms is not None and g_rms < args.grad_tol
+        if ref.get("gradient_ha_bohr") is None:
+            grad_ok = True
+            g_rms = None
+
+        ref_iters = ref.get("scf_iterations")
+        cu_iters = cuest_r.get("scf_iterations")
+        iter_delta = (None if ref_iters is None or cu_iters is None
+                      else cu_iters - ref_iters)
+
+        passed = energy_ok and grad_ok
         status = "PASS" if passed else "FAIL"
-        print(f"{cuest_r['energy_ha']:.10f} Ha  Δ={diff:+.3e}  [{status}]")
+        g_str = f" gRMS={g_rms:.2e}" if g_rms is not None else ""
+        i_str = (f" iters={cu_iters}"
+                 + (f"(Δ{iter_delta:+d})" if iter_delta is not None else ""))
+        print(f"{cuest_r['energy_ha']:.10f} Ha  ΔE={diff:+.3e}{g_str}  "
+              f"{i_str}  [{status}]")
 
         if passed:
             n_pass += 1
@@ -206,35 +255,38 @@ def main():
             "molecule": config["molecule"],
             "functional": config["functional"],
             "basis_label": config["basis_label"],
+            "shell": config["shell"],
+            "density_fitting": config.get("density_fitting", True),
+            "aux_basis_label": config.get("aux_basis_label"),
             "ref_energy_ha": ref["energy_ha"],
-            "ref_homo_ha": ref.get("homo_ha"),
-            "ref_lumo_ha": ref.get("lumo_ha"),
+            "ref_scf_iterations": ref_iters,
+            "ref_gradient_ha_bohr": ref.get("gradient_ha_bohr"),
             "cuest_energy_ha": cuest_r["energy_ha"],
+            "cuest_scf_iterations": cu_iters,
+            "cuest_gradient_ha_bohr": cuest_r.get("gradient_ha_bohr"),
             "cuest_converged": cuest_r["converged"],
             "cuest_wall_s": cuest_r["wall_s"],
             "energy_diff_ha": diff,
-            "energy_ok": passed,
+            "grad_rms_ha_bohr": g_rms,
+            "scf_iter_delta": iter_delta,
+            "energy_ok": energy_ok,
+            "grad_ok": grad_ok,
+            "ok": passed,
         })
 
-    # Summary
     print(f"\n{'='*60}")
-    print(f"  RESULTS: {n_pass} PASS, {n_fail} FAIL, {n_error} ERROR  (of {len(testable)})")
-    print(f"  Tolerance: {args.tolerance_ha} Ha")
+    print(f"  RESULTS: {n_pass} PASS, {n_fail} FAIL, {n_error} ERROR  "
+          f"(of {len(testable)})")
+    print(f"  Energy tol: {args.tolerance_ha} Ha | Grad RMS tol: {args.grad_tol}")
     print(f"{'='*60}")
 
     if n_fail > 0:
         print("\nFailures:")
         for r in results:
-            if r.get("energy_ok") is False:
-                print(f"  {r['molecule']}/{r['functional']}/{r['basis_label']}: "
-                      f"Δ={r['energy_diff_ha']:+.3e} Ha")
-    if n_error > 0:
-        print("\nErrors:")
-        for r in results:
-            if r.get("cuest_ok") is False:
-                print(f"  {r['molecule']}/{r['functional']}/{r['basis_label']}: {r.get('cuest_error','?')}")
-            elif r.get("ref_ok") is False:
-                print(f"  {r['molecule']}/{r['functional']}/{r['basis_label']}: ref: {r.get('ref_error','?')}")
+            if r.get("ok") is False:
+                print(f"  {r['molecule']}/{r['functional']}/{r['basis_label']}/"
+                      f"{r['shell']}: ΔE={r.get('energy_diff_ha'):+.3e} "
+                      f"gRMS={r.get('grad_rms_ha_bohr')}")
 
     with open(RESULTS_FILE, "w") as f:
         json.dump(results, f, indent=2)

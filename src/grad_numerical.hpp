@@ -50,7 +50,8 @@ inline std::vector<double> numerical_gradient(
     const std::string& aux_path,
     int func_id, int rad_pts, int ang_pts,
     struct SCFParams params, bool quiet,
-    const std::string& binary_path = "build/cuest_dft")
+    const std::string& binary_path = "build/cuest_dft",
+    int is_pure = 1)
 {
   size_t natom = mol.natom();
   double delta = 0.005; // Angstrom
@@ -97,6 +98,7 @@ inline std::vector<double> numerical_gradient(
             << " --multiplicity " << mol.multiplicity()
             << " --max-iter " << params.max_iter
             << " --conv-thresh " << params.conv_thresh
+            << (is_pure ? " --spherical" : " --cartesian")
             << " --quiet";
 
         FILE* pipe = popen(cmd.str().c_str(), "r");

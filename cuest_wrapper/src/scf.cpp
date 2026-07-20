@@ -572,6 +572,8 @@ void SCFSolver::run() {
             << "NAO " << nao_ << "\n"
             << "NOCC " << nocc_ << "\n"
             << "NELEC " << nelec_ << "\n"
+            << "N_SCF " << iter_ << "\n"
+            << "CONVERGED " << (converged_ ? 1 : 0) << "\n"
             << "=== END_ENERGY_COMPONENTS ===\n";
 }
 

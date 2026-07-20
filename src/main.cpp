@@ -82,11 +82,16 @@ static void print_help(const char* prog) {
       << "  --quiet                  Minimal output\n"
       << "  --verbose                Verbose output\n"
       << "  --print-mos              Print final MO energies\n"
-      << "  --gradient               Compute and print nuclear gradient\n"
+      << "  --spherical              Spherical (pure) orbital Gaussians (default)\n"
+      << "  --cartesian              Cartesian orbital Gaussians\n"
+      << "  --gradient               Nuclear gradient (analytic + numerical)\n"
+      << "  --analytic-gradient      Analytic nuclear gradient only\n"
       << "  --help                   Show this help\n\n"
       << "Notes:\n"
       << "  Density fitting is required (--aux-basis). Only closed-shell RKS\n"
-      << "  (even electron count, multiplicity 1) is supported.\n\n"
+      << "  (even electron count, multiplicity 1) is supported.\n"
+      << "  The DF auxiliary basis is always spherical; --cartesian applies\n"
+      << "  to the orbital basis only.\n\n"
       << "Available functionals:\n"
       << "  PBE B3LYP B3LYP5 PBE0 CAM-B3LYP WB97X-V WB97M-V\n"
       << "  HSE06 M06 M06-2X LC-WPBE LC-WPBEH WB97X\n\n"
@@ -116,7 +121,9 @@ int main(int argc, char* argv[]) {
   bool verbose = true;
   bool print_mos = false;
   bool gradient = false;
+  bool numerical_gradient_flag = true;
   bool quiet = false;
+  int is_pure = 1;  // orbital basis: 1 = spherical, 0 = Cartesian
 
   for (int i = 1; i < argc; i++) {
     std::string arg = argv[i];
@@ -166,8 +173,16 @@ int main(int argc, char* argv[]) {
       verbose = true;
     } else if (arg == "--print-mos") {
       print_mos = true;
+    } else if (arg == "--spherical") {
+      is_pure = 1;
+    } else if (arg == "--cartesian") {
+      is_pure = 0;
     } else if (arg == "--gradient") {
       gradient = true;
+      numerical_gradient_flag = true;
+    } else if (arg == "--analytic-gradient") {
+      gradient = true;
+      numerical_gradient_flag = false;
     } else {
       std::cerr << "Unknown argument: " << arg << "\n";
       std::cerr << "Use --help for usage information.\n";
@@ -233,20 +248,26 @@ int main(int argc, char* argv[]) {
     CuESTContext ctx;
 
     // --- Build primary basis from JSON ---
-    if (!quiet) std::cout << "Building primary basis from: " << basis_path << "\n";
-    BasisBuilder basis_builder(ctx, mol, /*is_pure=*/1);
+    if (!quiet) {
+      std::cout << "Building primary basis from: " << basis_path << "\n";
+      std::cout << "  Orbital shells: "
+                << (is_pure ? "spherical (pure)" : "Cartesian") << "\n";
+    }
+    BasisBuilder basis_builder(ctx, mol, is_pure);
     basis_builder.build_from_json(basis_path);
 
     uint64_t nao = basis_builder.nao();
     if (!quiet) std::cout << "  Basis functions: " << nao << "\n";
 
     // --- Build auxiliary basis (required for DF) ---
+    // cuEST DF currently requires a spherical auxiliary basis.
     if (aux_basis_path.empty()) {
       std::cerr << "Error: Density fitting is required.\n"
                 << "  Use --aux-basis with a BSE JSON auxiliary basis.\n";
       return 1;
     }
-    if (!quiet) std::cout << "Building auxiliary basis from: " << aux_basis_path << "\n";
+    if (!quiet) std::cout << "Building auxiliary basis from: " << aux_basis_path
+                          << " (spherical)\n";
     auto aux_basis = std::make_unique<AuxBasis>(ctx, mol, /*is_pure=*/1);
     aux_basis->build_from_json(aux_basis_path);
     uint64_t naux = ctx.query_nao(aux_basis->basis());
@@ -391,18 +412,20 @@ int main(int argc, char* argv[]) {
                   << "  |F| = " << std::sqrt(fx*fx+fy*fy+fz*fz) << "\n";
       }
 
-      const char* exe_path = argv[0];
-      auto forces = numerical_gradient(mol, basis_path, aux_basis_path,
-          functional_id, radial_pts, angular_pts,
-          scf_params, quiet, exe_path);
+      if (numerical_gradient_flag) {
+        const char* exe_path = argv[0];
+        auto forces = numerical_gradient(mol, basis_path, aux_basis_path,
+            functional_id, radial_pts, angular_pts,
+            scf_params, quiet, exe_path, is_pure);
 
-      std::cout << "\n=== Numerical Gradient (Ha/bohr) ===\n";
-      for (size_t a = 0; a < mol.natom(); a++) {
-        double fx = forces[3*a], fy = forces[3*a+1], fz = forces[3*a+2];
-        double fnorm = std::sqrt(fx*fx + fy*fy + fz*fz);
-        std::cout << "  Atom " << a << " " << mol.atom(a).symbol
-                  << std::setw(13) << fx << std::setw(13) << fy
-                  << std::setw(13) << fz << "  |F| = " << fnorm << "\n";
+        std::cout << "\n=== Numerical Gradient (Ha/bohr) ===\n";
+        for (size_t a = 0; a < mol.natom(); a++) {
+          double fx = forces[3*a], fy = forces[3*a+1], fz = forces[3*a+2];
+          double fnorm = std::sqrt(fx*fx + fy*fy + fz*fz);
+          std::cout << "  Atom " << a << " " << mol.atom(a).symbol
+                    << std::setw(13) << fx << std::setw(13) << fy
+                    << std::setw(13) << fz << "  |F| = " << fnorm << "\n";
+        }
       }
     } else if (gradient && !scf.converged()) {
       std::cerr << "Gradient requested but SCF not converged — skipping.\n";

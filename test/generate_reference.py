@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
 """
-Generate reference energies for all validation configurations using PySCF.
+Generate PySCF-DF reference energies, SCF iteration counts, and gradients.
 
-Reads the same BSE JSON basis files as cuEST, computes reference DFT
-energies, and writes them to a reference JSON file.
+Default matrix: all molecules × {PBE, WB97X} × all bases × {spherical, cartesian}.
+DF auxiliary bases are always spherical (matching cuEST).
+
+Each reference entry records density_fitting=true and aux_basis_label so
+exact-integral (non-DF) refs can be stored alongside later.
+
+Gradients: analytic for spherical orbitals only. Cartesian-orbital refs are
+energy (+ SCF iters) only — PySCF has no mixed cart/sph DF analytic gradient,
+and finite-difference grads are not accurate enough for validation.
 
 Usage:
-    python3 test/generate_reference.py                    # all configs
-    python3 test/generate_reference.py --quick            # PBE-only subset
-    python3 test/generate_reference.py --molecule H2O     # single molecule
+    python3 test/generate_reference.py [--quick] [--merge] [--molecule]
+        [--functional] [--basis] [--shell] [--output]
 """
 
 import json
@@ -19,156 +25,169 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (  # noqa: E402
-    AUX_JSON, BASIS_DIR, MOLECULES_DIR, PROJ_DIR, PYSCF_XC_MAP,
-    load_xyz, run_pyscf_df,
+    PROJ_DIR, build_energy_matrix, load_xyz, run_pyscf_df,
 )
 
 REFERENCE_FILE = PROJ_DIR / "test" / "reference.json"
 
-BASIS_SETS = {
-    "def2SVP":  {"basis": "def2-svp.json", "aux": AUX_JSON},
-    "def2TZVP": {"basis": "def2-tzvp.json", "aux": AUX_JSON},
-    "def2SVPD": {"basis": "def2-svpd.json", "aux": AUX_JSON},
-    "cc-pVDZ":  {"basis": "cc-pvdz.json", "aux": AUX_JSON},
-    "cc-pVTZ":  {"basis": "cc-pvtz.json", "aux": AUX_JSON},
-}
 
-FUNCTIONALS = ["PBE", "B3LYP", "PBE0", "CAM-B3LYP", "WB97X", "HSE06", "M06", "M06-2X"]
+def ref_key(r):
+    """Identity for a reference entry.
 
+    Includes DF flag + aux label so density-fitted and exact-integral refs
+    can coexist for the same molecule/functional/orbital basis/shell.
+    """
+    df = bool(r.get("density_fitting", True))
+    aux = r.get("aux_basis_label") if df else None
+    return (
+        r["molecule"],
+        r["functional"],
+        r["basis_label"],
+        r.get("shell", "spherical"),
+        df,
+        aux,
+    )
 
-# ---------------------------------------------------------------------------
-# Test matrix
-# ---------------------------------------------------------------------------
-
-def build_test_matrix(quick=False):
-    molecules = [
-        ("h2o.xyz", "H2O"), ("nh3.xyz", "NH3"), ("h2.xyz", "H2"),
-        ("hf.xyz", "HF"), ("n2.xyz", "N2"), ("co2.xyz", "CO2"),
-        ("ch4.xyz", "CH4"), ("c2h4.xyz", "C2H4"), ("bh3.xyz", "BH3"),
-        ("so2.xyz", "SO2"),
-    ]
-    matrix = []
-    for xyz_file, label in molecules:
-        xyz_path = MOLECULES_DIR / xyz_file
-        if not xyz_path.exists():
-            continue
-        for bs_key, bs in BASIS_SETS.items():
-            basis_file = BASIS_DIR / bs["basis"]
-            if not basis_file.exists():
-                continue
-            funcs = ["PBE"] if quick else (FUNCTIONALS if label in ("H2O", "NH3") else ["PBE"])
-            for func in funcs:
-                if quick and bs_key not in ("def2SVP",):
-                    continue
-                matrix.append({
-                    "molecule": label, "xyz": str(xyz_path),
-                    "basis": str(basis_file),
-                    "aux_basis": str(BASIS_DIR / bs["aux"]),
-                    "functional": func,
-                    "basis_label": bs_key,
-                })
-
-    # Heavy-element tests (ECP auto-detected)
-    for xyz_file, label in [("br2.xyz", "Br2"), ("i2.xyz", "I2"), ("ch2i2.xyz", "CH2I2")]:
-        xyz_path = MOLECULES_DIR / xyz_file
-        basis_path = BASIS_DIR / "def2-svp.json"
-        aux_path = BASIS_DIR / AUX_JSON
-        if not xyz_path.exists() or not basis_path.exists():
-            continue
-        funcs = ["PBE"] if quick else ["PBE", "B3LYP", "PBE0"]
-        for func in funcs:
-            matrix.append({
-                "molecule": label, "xyz": str(xyz_path),
-                "basis": str(basis_path),
-                "aux_basis": str(aux_path),
-                "functional": func,
-                "basis_label": "def2SVP", "has_ecp": True,
-            })
-    return matrix
-
-
-# ---------------------------------------------------------------------------
-# PySCF-DF runner (aligned with cuEST)
-# ---------------------------------------------------------------------------
 
 def run_pyscf(config):
-    """Compute density-fitted reference energy with PySCF."""
     atoms = load_xyz(config["xyz"])
     start = time.time()
+    shell = config.get("shell", "spherical")
     r = run_pyscf_df(
         atoms, config["basis"], config["aux_basis"], config["functional"],
         grid_level=3,
+        shell=shell,
+        compute_gradient=(shell == "spherical"),
     )
     elapsed = time.time() - start
     if not r["ok"]:
-        return {"ok": False, "error": r.get("error", "PySCF failed"), "wall_s": elapsed}
+        return {"error": r.get("error", "PySCF failed"), "wall_s": elapsed}
     return {
-        "ok": True,
         "energy_ha": r["energy"],
         "homo_ha": r["homo"],
         "lumo_ha": r["lumo"],
+        "scf_iterations": r["scf_iterations"],
+        "gradient_ha_bohr": r["gradient_ha_bohr"],
+        "nao": r.get("nao"),
         "wall_s": elapsed,
     }
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
 def main():
     import argparse
-    p = argparse.ArgumentParser(description="Generate PySCF reference energies")
-    p.add_argument("--quick", action="store_true")
+    p = argparse.ArgumentParser(description="Generate PySCF reference data")
+    p.add_argument("--quick", action="store_true",
+                   help="H2O/PBE/def2SVP/spherical only")
+    p.add_argument("--merge", action="store_true",
+                   help="Merge into existing reference.json (replace matching keys)")
     p.add_argument("--molecule", type=str)
     p.add_argument("--functional", type=str)
+    p.add_argument("--basis", type=str)
+    p.add_argument("--shell", type=str, choices=["spherical", "cartesian"])
     p.add_argument("--output", type=str, default=str(REFERENCE_FILE))
     args = p.parse_args()
 
-    matrix = build_test_matrix(quick=args.quick)
+    matrix = build_energy_matrix(quick=args.quick)
     if args.molecule:
         matrix = [c for c in matrix if c["molecule"] == args.molecule]
     if args.functional:
         matrix = [c for c in matrix if c["functional"] == args.functional]
+    if args.basis:
+        matrix = [c for c in matrix if c["basis_label"] == args.basis]
+    if args.shell:
+        matrix = [c for c in matrix if c["shell"] == args.shell]
     if not matrix:
-        print("No configurations match filters."); sys.exit(1)
+        print("No configurations match filters.")
+        sys.exit(1)
 
-    print(f"Generating {len(matrix)} PySCF references...")
-    print(f"Output: {args.output}")
-    results = []
+    out_path = Path(args.output)
+    by_key = {}
+    if args.merge and out_path.exists():
+        prev = json.loads(out_path.read_text())
+        for r in prev.get("results", []):
+            by_key[ref_key(r)] = r
+        print(f"Merging into {len(by_key)} existing references")
+
+    shells = sorted({c["shell"] for c in matrix})
+    grad_note = ("energy only" if shells == ["cartesian"]
+                 else "analytic grads for spherical; energy only for cartesian")
+    print(f"Generating {len(matrix)} PySCF-DF references ({grad_note})...")
+    print(f"  Bases:       {sorted({c['basis_label'] for c in matrix})}")
+    print(f"  Functionals: {sorted({c['functional'] for c in matrix})}")
+    print(f"  Shells:      {shells}")
+    print(f"  Molecules:   {sorted({c['molecule'] for c in matrix})}")
+    print(f"Output: {out_path}")
     n_ok, n_fail = 0, 0
 
     for i, config in enumerate(matrix):
-        label = f"{config['molecule']}/{config['functional']}/{config['basis_label']}"
+        df = bool(config.get("density_fitting", True))
+        aux_label = (config.get("aux_basis_label")
+                     or Path(Path(config["aux_basis"]).name).stem)
+        if not df:
+            aux_label = None
+        label = (f"{config['molecule']}/{config['functional']}/"
+                 f"{config['basis_label']}/{config['shell']}")
+        if df:
+            label += f"/df:{aux_label}"
+        else:
+            label += "/exact"
         print(f"[{i+1}/{len(matrix)}] {label} ...", end=" ", flush=True)
 
         try:
             r = run_pyscf(config)
         except Exception as e:
-            r = {"ok": False, "error": str(e)}
+            r = {"error": str(e)}
 
-        if r["ok"]:
-            print(f"{r['energy_ha']:.10f} Ha ({r['wall_s']:.1f}s)")
-            n_ok += 1
-        else:
-            print(f"FAILED: {r['error']}")
-            n_fail += 1
-
-        results.append({
+        key = ref_key({
             "molecule": config["molecule"],
             "functional": config["functional"],
             "basis_label": config["basis_label"],
-            **r,
+            "shell": config["shell"],
+            "density_fitting": df,
+            "aux_basis_label": aux_label,
         })
+        if "energy_ha" in r:
+            print(f"{r['energy_ha']:.10f} Ha  iters={r['scf_iterations']} "
+                  f"({r.get('wall_s', 0):.1f}s)")
+            n_ok += 1
+            by_key[key] = {
+                "molecule": config["molecule"],
+                "functional": config["functional"],
+                "basis_label": config["basis_label"],
+                "shell": config["shell"],
+                "density_fitting": df,
+                "aux_basis_label": aux_label,
+                "energy_ha": r["energy_ha"],
+                "homo_ha": r["homo_ha"],
+                "lumo_ha": r["lumo_ha"],
+                "scf_iterations": r["scf_iterations"],
+                "gradient_ha_bohr": r["gradient_ha_bohr"],
+                "nao": r.get("nao"),
+            }
+        else:
+            print(f"FAILED: {r.get('error', 'unknown')}")
+            n_fail += 1
+            by_key.pop(key, None)
 
-        with open(args.output, "w") as f:
+        results = sorted(
+            by_key.values(),
+            key=lambda r: (
+                r["molecule"], r["functional"], r["basis_label"],
+                r.get("shell", "spherical"),
+                not bool(r.get("density_fitting", True)),
+                r.get("aux_basis_label") or "",
+            ),
+        )
+        with open(out_path, "w") as f:
             json.dump({
                 "generated": datetime.now(timezone.utc).isoformat(),
-                "pyscf_basis_source": "bse_json_density_fit",
                 "results": results,
             }, f, indent=2)
+            f.write("\n")
 
-    print(f"\nDone: {n_ok} OK, {n_fail} failed  -> {args.output}")
-    sys.exit(0 if n_fail == 0 else 1)
+    print(f"\nDone: {n_ok} OK, {n_fail} failed  -> {out_path} "
+          f"({len(by_key)} total refs)")
+    sys.exit(0 if n_ok > 0 else 1)
 
 
 if __name__ == "__main__":
