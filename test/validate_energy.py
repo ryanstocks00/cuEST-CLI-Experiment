@@ -21,7 +21,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 PROJ_DIR = Path(__file__).resolve().parent.parent
-DATA_DIR = PROJ_DIR / "data"
+MOLECULES_DIR = PROJ_DIR / "data" / "molecules"
+BASIS_DIR = PROJ_DIR / "data" / "basis_sets"
 BUILD_DIR = PROJ_DIR / "build"
 EXE = BUILD_DIR / "cuest_dft"
 RESULTS_FILE = PROJ_DIR / "test" / "validation_results.json"
@@ -34,28 +35,23 @@ RESULTS_FILE = PROJ_DIR / "test" / "validation_results.json"
 BASIS_SETS = {
     "def2SVP": {
         "basis": "def2-svp.json",
-        "aux": "def2-universal-jkfit.gbs",  # aux still GBS for now
-        "ecp": None,  # ECP auto-detected from JSON
+        "aux": "def2-universal-jkfit.json",
     },
     "def2TZVP": {
         "basis": "def2-tzvp.json",
-        "aux": "def2-universal-jkfit.gbs",
-        "ecp": None,
+        "aux": "def2-universal-jkfit.json",
     },
     "def2SVPD": {
         "basis": "def2-svpd.json",
-        "aux": "def2-universal-jkfit.gbs",
-        "ecp": None,
+        "aux": "def2-universal-jkfit.json",
     },
     "cc-pVDZ": {
         "basis": "cc-pvdz.json",
-        "aux": "def2-universal-jkfit.gbs",
-        "ecp": None,
+        "aux": "def2-universal-jkfit.json",
     },
     "cc-pVTZ": {
         "basis": "cc-pvtz.json",
-        "aux": "def2-universal-jkfit.gbs",
-        "ecp": None,
+        "aux": "def2-universal-jkfit.json",
     },
 }
 
@@ -87,46 +83,42 @@ PYSCF_XC_MAP = {
     "WB97X": "wb97x",
 }
 
-# PySCF basis name mapping (works with both .gbs and .json)
+# PySCF basis name mapping
 PYSCF_BASIS_MAP = {
-    "def2-svp.gbs": "def2SVP",
-    "def2-tzvp.gbs": "def2TZVP",
-    "def2-svpd.gbs": "def2SVPD",
-    "cc-pvdz.gbs": "cc-pVDZ",
-    "cc-pvtz.gbs": "cc-pVTZ",
     "def2-svp.json": "def2SVP",
     "def2-tzvp.json": "def2TZVP",
     "def2-svpd.json": "def2SVPD",
     "cc-pvdz.json": "cc-pVDZ",
     "cc-pvtz.json": "cc-pVTZ",
+    "def2-universal-jkfit.json": "def2-universal-jkfit",
 }
 
 
 def build_test_matrix(quick=False):
     """Return list of test configurations as dicts."""
     molecules = [
-        ("test_H2O.xyz", "H2O"),
-        ("test_NH3.xyz", "NH3"),
-        ("test_H2.xyz", "H2"),
-        ("test_HF.xyz", "HF"),
-        ("test_N2.xyz", "N2"),
-        ("test_CO2.xyz", "CO2"),
-        ("test_CH4.xyz", "CH4"),
-        ("test_C2H4.xyz", "C2H4"),
-        ("test_BH3.xyz", "BH3"),
-        ("test_SO2.xyz", "SO2"),
+        ("h2o.xyz", "H2O"),
+        ("nh3.xyz", "NH3"),
+        ("h2.xyz", "H2"),
+        ("hf.xyz", "HF"),
+        ("n2.xyz", "N2"),
+        ("co2.xyz", "CO2"),
+        ("ch4.xyz", "CH4"),
+        ("c2h4.xyz", "C2H4"),
+        ("bh3.xyz", "BH3"),
+        ("so2.xyz", "SO2"),
     ]
 
     matrix = []
 
     for xyz_file, label in molecules:
-        xyz_path = DATA_DIR / xyz_file
+        xyz_path = MOLECULES_DIR / xyz_file
         if not xyz_path.exists():
             continue
 
         for bs_key, bs in BASIS_SETS.items():
-            basis_file = DATA_DIR / bs["basis"]
-            aux_file = DATA_DIR / bs["aux"]
+            basis_file = BASIS_DIR / bs["basis"]
+            aux_file = BASIS_DIR / bs["aux"]
             if not basis_file.exists() or not aux_file.exists():
                 continue
 
@@ -148,7 +140,7 @@ def build_test_matrix(quick=False):
                     "xyz": str(xyz_path),
                     "basis": str(basis_file),
                     "aux_basis": str(aux_file),
-                    "ecp": str(DATA_DIR / bs["ecp"]) if bs["ecp"] else None,
+                    "ecp": None,  # ECP auto-detected from JSON
                     "functional": func,
                     "basis_label": bs_key,
                     "has_ecp": False,
@@ -156,14 +148,14 @@ def build_test_matrix(quick=False):
 
     # Add heavy-element tests (ECP auto-detected from JSON)
     ecp_tests = [
-        ("v_Br2_PBE_def2SVP.xyz", "Br2"),
-        ("v_I2_PBE_def2SVP.xyz", "I2"),
+        ("br2.xyz", "Br2"),
+        ("i2.xyz", "I2"),
         ("ch2i2.xyz", "CH2I2"),
     ]
     for xyz_file, label in ecp_tests:
-        xyz_path = DATA_DIR / xyz_file
-        basis_path = DATA_DIR / "def2-svp.json"
-        aux_path = DATA_DIR / "def2-universal-jkfit.gbs"
+        xyz_path = MOLECULES_DIR / xyz_file
+        basis_path = BASIS_DIR / "def2-svp.json"
+        aux_path = BASIS_DIR / "def2-universal-jkfit.json"
         if not all(p.exists() for p in [xyz_path, basis_path, aux_path]):
             continue
         funcs = ["PBE"] if quick else ["PBE", "B3LYP", "PBE0"]

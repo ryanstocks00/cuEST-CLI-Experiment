@@ -406,10 +406,24 @@ void SCFSolver::run() {
           coeffs[i] = s / Bc[i*m+i];
         }
 
+        // Clamp DIIS coefficients to [0, 1] to prevent extrapolation
+        // overshoot (critical for systems with deep ECPs).
+        // Re-normalize after clamping.
+        double coeff_sum = 0.0;
+        for (int i = 0; i < nvec; i++) {
+          if (coeffs[i] < 0.0) coeffs[i] = 0.0;
+          if (coeffs[i] > 1.0) coeffs[i] = 1.0;
+          coeff_sum += coeffs[i];
+        }
+        if (coeff_sum > 1e-12) {
+          for (int i = 0; i < nvec; i++) coeffs[i] /= coeff_sum;
+        }
+
         std::vector<double> F_diis(N*N, 0.0);
         for (int i = 0; i < nvec; i++)
           for (int j = 0; j < N*N; j++)
             F_diis[j] += coeffs[i] * diis_focks[i][j];
+
         cudaMemcpy(d_Fock_, F_diis.data(), N*N*sizeof(double), cudaMemcpyHostToDevice);
       }
     }
@@ -422,6 +436,20 @@ void SCFSolver::run() {
 
     // Build new density
     build_density_matrix();
+
+    // DIIS trust-region: if DIIS overshoots (Tr[D*S] far from nocc),
+    // revert to the raw Fock matrix for this iteration.
+    if (iter_ >= params_.diis_start + 2) {
+      double trDS = trace_dot(d_D_, d_S_, N);
+      if (std::abs(trDS - nocc_) > 0.5 * nocc_) {
+        if (params_.print_level >= 2)
+          std::cout << "  DIIS rejected (Tr[D*S]=" << trDS
+                    << "), using raw Fock\n";
+        cudaMemcpy(d_Fock_, F_host.data(), N*N*sizeof(double), cudaMemcpyHostToDevice);
+        diagonalize_fock();
+        build_density_matrix();
+      }
+    }
 
     // Density damping: D = (1-damping)*D_new + damping*D_old
     if (params_.damping > 0.0) {
