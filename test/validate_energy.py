@@ -83,17 +83,6 @@ PYSCF_XC_MAP = {
     "WB97X": "wb97x",
 }
 
-# PySCF basis name mapping
-PYSCF_BASIS_MAP = {
-    "def2-svp.json": "def2SVP",
-    "def2-tzvp.json": "def2TZVP",
-    "def2-svpd.json": "def2SVPD",
-    "cc-pvdz.json": "cc-pVDZ",
-    "cc-pvtz.json": "cc-pVTZ",
-    "def2-universal-jkfit.json": "def2-universal-jkfit",
-}
-
-
 def build_test_matrix(quick=False):
     """Return list of test configurations as dicts."""
     molecules = [
@@ -254,11 +243,82 @@ def run_cuest(config, timeout=300):
 
 
 # ---------------------------------------------------------------------------
+# BSE JSON to PySCF basis converter
+# ---------------------------------------------------------------------------
+
+def bse_json_to_pyscf(basis_path):
+    """Parse a BSE JSON basis file into PySCF format using gto.basis.parse."""
+    import json
+    from pyscf import gto
+
+    with open(basis_path) as f:
+        data = json.load(f)
+
+    _ELEMENTS = [
+        "X",  "H",  "HE", "LI", "BE", "B",  "C",  "N",  "O",  "F",  "NE",
+        "NA", "MG", "AL", "SI", "P",  "S",  "CL", "AR", "K",  "CA",
+        "SC", "TI", "V",  "CR", "MN", "FE", "CO", "NI", "CU", "ZN",
+        "GA", "GE", "AS", "SE", "BR", "KR", "RB", "SR", "Y",  "ZR",
+        "NB", "MO", "TC", "RU", "RH", "PD", "AG", "CD", "IN", "SN",
+        "SB", "TE", "I",  "XE", "CS", "BA", "LA", "CE", "PR", "ND",
+        "PM", "SM", "EU", "GD", "TB", "DY", "HO", "ER", "TM", "YB",
+        "LU", "HF", "TA", "W",  "RE", "OS", "IR", "PT", "AU", "HG",
+        "TL", "PB", "BI", "PO", "AT", "RN", "FR", "RA", "AC", "TH",
+        "PA", "U",  "NP", "PU", "AM", "CM", "BK", "CF", "ES", "FM",
+        "MD", "NO", "LR", "RF", "DB", "SG", "BH", "HS", "MT", "DS",
+        "RG", "CN", "NH", "FL", "MC", "LV", "TS", "OG",
+    ]
+    am_chars = "SPDFGHIKLMNOQR"
+
+    basis_dict = {}
+    ecp_dict = {}
+
+    for z_str, edata in data.get("elements", {}).items():
+        z = int(z_str)
+        if z <= 0 or z >= len(_ELEMENTS):
+            continue
+        symbol = _ELEMENTS[z]
+
+        # --- Electron shells in NWChem format ---
+        shells = edata.get("electron_shells", [])
+        if shells:
+            lines = []
+            for sh in shells:
+                for L in sh["angular_momentum"]:
+                    am = am_chars[L] if L < len(am_chars) else "S"
+                    lines.append(f"{symbol}    {am}")
+                    for p in range(len(sh["exponents"])):
+                        exp = float(sh["exponents"][p])
+                        coeff_strs = [f"{float(ca[p]):.12f}" for ca in sh["coefficients"]]
+                        lines.append(f"    {exp:.12f}  " + "  ".join(coeff_strs))
+            basis_dict[symbol] = gto.basis.parse("\n".join(lines))
+
+        # --- ECP in NWChem format ---
+        ecp_pots = edata.get("ecp_potentials", [])
+        if ecp_pots:
+            nelec = edata.get("ecp_electrons", 0)
+            lines = [f"{symbol} nelec {nelec}"]
+            for pot in ecp_pots:
+                L = pot["angular_momentum"][0]
+                am = am_chars[L].lower() if L < len(am_chars) else "s"
+                lines.append(f"{symbol} {am}-ul")
+                nprim = len(pot["r_exponents"])
+                lines.append(f"  {nprim}")
+                for i in range(nprim):
+                    r = pot["r_exponents"][i]
+                    g = float(pot["gaussian_exponents"][i])
+                    c = float(pot["coefficients"][0][i])
+                    lines.append(f"  {r}  {g:.12f}  {c:.12f}")
+            ecp_dict[symbol] = (nelec, "\n".join(lines))
+
+    return basis_dict, (ecp_dict if ecp_dict else None)
+
+# ---------------------------------------------------------------------------
 # PySCF reference runner
 # ---------------------------------------------------------------------------
 
 def run_pyscf(config):
-    """Compute PySCF reference energy. Returns dict."""
+    """Compute PySCF reference energy using BSE JSON basis directly."""
     try:
         from pyscf import gto, dft
     except ImportError:
@@ -277,15 +337,29 @@ def run_pyscf(config):
     except Exception as e:
         return {"ok": False, "error": f"XYZ parse: {e}"}
 
-    # Map basis
-    basis_name = Path(config["basis"]).name
-    pyscf_basis = PYSCF_BASIS_MAP.get(basis_name, "def2SVP")
-
-    # ECP: PySCF auto-detects ECP from def2 basis for heavy elements
-    has_ecp = config.get("has_ecp", False)
-
+    # Parse BSE JSON basis → PySCF format
     try:
-        mol = gto.M(atom=atoms, basis=pyscf_basis, verbose=0)
+        basis_dict, ecp_data = bse_json_to_pyscf(config["basis"])
+    except Exception as e:
+        return {"ok": False, "error": f"Basis parse: {e}"}
+
+    # Build molecule with custom basis.
+    try:
+        # Parse ECP strings via PySCF's native parser
+        mol_ecp = None
+        if ecp_data:
+            symbols_in_mol = {a[0].upper() for a in atoms}
+            ecp_parsed = {}
+            for s in symbols_in_mol:
+                if s in ecp_data:
+                    nelec, ecp_str = ecp_data[s]
+                    ecp_parsed[s] = (nelec, gto.basis.parse_ecp(ecp_str))
+            if ecp_parsed:
+                mol_ecp = ecp_parsed
+        if mol_ecp:
+            mol = gto.M(atom=atoms, basis=basis_dict, ecp=mol_ecp, verbose=0)
+        else:
+            mol = gto.M(atom=atoms, basis=basis_dict, verbose=0)
     except Exception as e:
         return {"ok": False, "error": f"PySCF mol build: {e}"}
 
@@ -298,11 +372,12 @@ def run_pyscf(config):
         mf.max_cycle = 200
         mf.conv_tol = 1e-10
         mf.grids.level = 5  # fine grid for accuracy
+        mf.init_guess = '1e'  # core Hamiltonian guess (MINAO fails with custom basis)
         energy = mf.kernel()
         converged = mf.converged
         nelec = mol.nelec
         if isinstance(nelec, (tuple, list)):
-            nelec = nelec[0] + nelec[1]  # newer PySCF returns (nalpha, nbeta)
+            nelec = nelec[0] + nelec[1]
         nocc = nelec // 2
         homo = float(mf.mo_energy[nocc - 1])
         lumo = float(mf.mo_energy[nocc])
