@@ -29,5 +29,11 @@ data/test_*.xyz
 *.pyc
 __pycache__/
 # JSON basis files are tracked in data/
-# test result JSON files are not
+# PySCF reference energies are tracked (test/reference.json).
+# cuEST validation run outputs are regenerated locally — do not track.
+test/cuest_results.json
+test/results_full.json
+test/validation_results.json
 test/validation*.json
+test/cuest_*.log
+test/*.pyc
