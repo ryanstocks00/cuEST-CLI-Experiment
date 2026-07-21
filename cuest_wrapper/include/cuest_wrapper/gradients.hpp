@@ -379,20 +379,20 @@ inline std::vector<double> GradientComputer::compute() {
   }
 
   // Final D2H pack (implicit sync)
-  ov_.resize(n3); cudaMemcpy(ov_.data(), d_ov, n3 * sizeof(double), cudaMemcpyDeviceToHost);
-  ke_.resize(n3); cudaMemcpy(ke_.data(), d_ke, n3 * sizeof(double), cudaMemcpyDeviceToHost);
-  po_.resize(n3); cudaMemcpy(po_.data(), d_po, n3 * sizeof(double), cudaMemcpyDeviceToHost);
-  pc_.resize(n3); cudaMemcpy(pc_.data(), d_p2, n3 * sizeof(double), cudaMemcpyDeviceToHost);
-  df_.resize(n3); cudaMemcpy(df_.data(), d_df, n3 * sizeof(double), cudaMemcpyDeviceToHost);
+  ov_.resize(n3); CUDA_CHECK(cudaMemcpy(ov_.data(), d_ov, n3 * sizeof(double), cudaMemcpyDeviceToHost));
+  ke_.resize(n3); CUDA_CHECK(cudaMemcpy(ke_.data(), d_ke, n3 * sizeof(double), cudaMemcpyDeviceToHost));
+  po_.resize(n3); CUDA_CHECK(cudaMemcpy(po_.data(), d_po, n3 * sizeof(double), cudaMemcpyDeviceToHost));
+  pc_.resize(n3); CUDA_CHECK(cudaMemcpy(pc_.data(), d_p2, n3 * sizeof(double), cudaMemcpyDeviceToHost));
+  df_.resize(n3); CUDA_CHECK(cudaMemcpy(df_.data(), d_df, n3 * sizeof(double), cudaMemcpyDeviceToHost));
   if (ecp_int_) {
     ecp_.resize(n3);
-    cudaMemcpy(ecp_.data(), d_ecp_buf, n3 * sizeof(double), cudaMemcpyDeviceToHost);
+    CUDA_CHECK(cudaMemcpy(ecp_.data(), d_ecp_buf, n3 * sizeof(double), cudaMemcpyDeviceToHost));
   } else {
     ecp_.assign(n3, 0.0);
   }
   if (xc_builder_ && !xc_builder_->is_hf()) {
     xc_.resize(n3);
-    cudaMemcpy(xc_.data(), d_xc, n3 * sizeof(double), cudaMemcpyDeviceToHost);
+    CUDA_CHECK(cudaMemcpy(xc_.data(), d_xc, n3 * sizeof(double), cudaMemcpyDeviceToHost));
   } else if (xc_.size() != n3) {
     xc_.assign(n3, 0.0);
   }

@@ -5,6 +5,7 @@
 
 #include "cuest_wrapper/nvtx.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cuda_runtime.h>
 #include <vector>
@@ -16,6 +17,8 @@ void DIIS::init(int max_space, int N) {
   n2_ = N * N;
   max_space_ = max_space;
   count_ = 0;
+  residual_ready_ = false;
+  last_rms_ = 0.0;
 
   const size_t n2_bytes = static_cast<size_t>(n2_) * sizeof(double);
   const size_t hist_bytes = n2_bytes * static_cast<size_t>(max_space);
@@ -28,7 +31,10 @@ void DIIS::init(int max_space, int N) {
   d_err_.alloc(n2_bytes);
 }
 
-void DIIS::clear() { count_ = 0; }
+void DIIS::clear() {
+  count_ = 0;
+  residual_ready_ = false;
+}
 
 void DIIS::push(cublasHandle_t blas, const double* d_err, const double* d_fock) {
   // Keep columns [0, count) packed oldest→newest for a single GEMM.
@@ -44,55 +50,42 @@ void DIIS::push(cublasHandle_t blas, const double* d_err, const double* d_fock) 
   ++count_;
 }
 
-double DIIS::error_rms(cublasHandle_t blas, const double* d_S,
-                      const double* d_Fock, const double* d_D) {
+double DIIS::compute_residual(cublasHandle_t blas, const double* d_S,
+                              const double* d_Fock, const double* d_D) {
   const int N = N_;
   const int n2 = n2_;
   double one = 1.0, zero = 0.0, minus_one = -1.0;
 
-  // FDS = (F*D)*S
-  cublasDgemm(blas, CUBLAS_OP_N, CUBLAS_OP_N, N, N, N, &one,
-              d_Fock, N, d_D, N, &zero, d_tmp1_, N);
-  cublasDgemm(blas, CUBLAS_OP_N, CUBLAS_OP_N, N, N, N, &one,
-              d_tmp1_, N, d_S, N, &zero, d_tmp2_, N);
-  // SDF = (S*D)*F
-  cublasDgemm(blas, CUBLAS_OP_N, CUBLAS_OP_N, N, N, N, &one,
-              d_S, N, d_D, N, &zero, d_tmp1_, N);
-  cublasDgemm(blas, CUBLAS_OP_N, CUBLAS_OP_N, N, N, N, &one,
-              d_tmp1_, N, d_Fock, N, &zero, d_err_, N);
-  // tmp2 = FDS - SDF
-  cublasDaxpy(blas, n2, &minus_one, d_err_, 1, d_tmp2_, 1);
+  // FDS = (F*D)*S → d_tmp2_
+  CUBLAS_CHECK(cublasDgemm(blas, CUBLAS_OP_N, CUBLAS_OP_N, N, N, N, &one,
+              d_Fock, N, d_D, N, &zero, d_tmp1_, N));
+  CUBLAS_CHECK(cublasDgemm(blas, CUBLAS_OP_N, CUBLAS_OP_N, N, N, N, &one,
+              d_tmp1_, N, d_S, N, &zero, d_tmp2_, N));
+  // SDF = (S*D)*F → d_err_
+  CUBLAS_CHECK(cublasDgemm(blas, CUBLAS_OP_N, CUBLAS_OP_N, N, N, N, &one,
+              d_S, N, d_D, N, &zero, d_tmp1_, N));
+  CUBLAS_CHECK(cublasDgemm(blas, CUBLAS_OP_N, CUBLAS_OP_N, N, N, N, &one,
+              d_tmp1_, N, d_Fock, N, &zero, d_err_, N));
+  // d_err_ = FDS - SDF
+  CUBLAS_CHECK(cublasDaxpy(blas, n2, &minus_one, d_err_, 1, d_tmp2_, 1));
+  CUBLAS_CHECK(cublasDcopy(blas, n2, d_tmp2_, 1, d_err_, 1));
 
   double ss = 0.0;
-  cublasDdot(blas, n2, d_tmp2_, 1, d_tmp2_, 1, &ss);
-  return std::sqrt(ss / static_cast<double>(n2));
+  CUBLAS_CHECK(cublasDdot(blas, n2, d_err_, 1, d_err_, 1, &ss));
+  last_rms_ = std::sqrt(ss / static_cast<double>(n2));
+  residual_ready_ = true;
+  return last_rms_;
 }
 
-void DIIS::extrapolate(cublasHandle_t blas, const double* d_S,
-                       DeviceArray<double>& d_Fock, const double* d_D) {
+void DIIS::extrapolate(cublasHandle_t blas, DeviceArray<double>& d_Fock) {
   NvtxRange range("DIIS");
-  const int N = N_;
-  const int n2 = n2_;
-  double one = 1.0, zero = 0.0, minus_one = -1.0;
+  if (!residual_ready_) return;
 
-  // FD = F * D
-  cublasDgemm(blas, CUBLAS_OP_N, CUBLAS_OP_N, N, N, N, &one,
-              d_Fock, N, d_D, N, &zero, d_tmp1_, N);
-  // FDS = FD * S
-  cublasDgemm(blas, CUBLAS_OP_N, CUBLAS_OP_N, N, N, N, &one,
-              d_tmp1_, N, d_S, N, &zero, d_tmp2_, N);
-  // SD = S * D
-  cublasDgemm(blas, CUBLAS_OP_N, CUBLAS_OP_N, N, N, N, &one,
-              d_S, N, d_D, N, &zero, d_tmp1_, N);
-  // SDF = SD * F
-  cublasDgemm(blas, CUBLAS_OP_N, CUBLAS_OP_N, N, N, N, &one,
-              d_tmp1_, N, d_Fock, N, &zero, d_err_, N);
-  // err = FDS - SDF
-  cublasDcopy(blas, n2, d_tmp2_, 1, d_tmp1_, 1);
-  cublasDaxpy(blas, n2, &minus_one, d_err_, 1, d_tmp1_, 1);
-  cublasDcopy(blas, n2, d_tmp1_, 1, d_err_, 1);
+  const int n2 = n2_;
+  double one = 1.0, zero = 0.0;
 
   push(blas, d_err_, d_Fock);
+  residual_ready_ = false;
 
   const int nvec = count_;
   if (nvec < 2) return;
@@ -105,18 +98,29 @@ void DIIS::extrapolate(cublasHandle_t blas, const double* d_S,
   CUDA_CHECK(cudaMemcpy(gram.data(), d_gram_,
                         gram.size() * sizeof(double), cudaMemcpyDeviceToHost));
 
-  // Augmented Pulay system: [Gram  -1; -1ᵀ  0] c = [0; -1]
+  // Jacobi (diagonal) preconditioning: c_i = dscale[i] * c'_i, so the scaled
+  // Gram block dscale[i]*Gram[i,j]*dscale[j] has unit diagonal.
+  std::vector<double> dscale(static_cast<size_t>(nvec));
+  for (int i = 0; i < nvec; i++) {
+    double d = gram[static_cast<size_t>(i + i * nvec)];
+    dscale[static_cast<size_t>(i)] = (d > 1e-300) ? 1.0 / std::sqrt(d) : 1.0;
+  }
+
+  // Augmented Pulay system: [Gram'  -d; -dᵀ  0] c' = [0; -1]
   const int m = nvec + 1;
   std::vector<double> B(static_cast<size_t>(m) * m, 0.0);
   for (int j = 0; j < nvec; j++)
     for (int i = 0; i < nvec; i++)
-      B[static_cast<size_t>(i + j * m)] = gram[static_cast<size_t>(i + j * nvec)];
+      B[static_cast<size_t>(i + j * m)] = dscale[static_cast<size_t>(i)] *
+          gram[static_cast<size_t>(i + j * nvec)] * dscale[static_cast<size_t>(j)];
   for (int i = 0; i < nvec; i++) {
-    B[static_cast<size_t>(i + nvec * m)] = -1.0;
-    B[static_cast<size_t>(nvec + i * m)] = -1.0;
+    B[static_cast<size_t>(i + nvec * m)] = -dscale[static_cast<size_t>(i)];
+    B[static_cast<size_t>(nvec + i * m)] = -dscale[static_cast<size_t>(i)];
   }
   std::vector<double> rhs(static_cast<size_t>(m), 0.0);
   rhs[static_cast<size_t>(nvec)] = -1.0;
+
+  const double pivot_tol = 1e-10;
 
   auto Bc = B;
   auto rhsc = rhs;
@@ -127,7 +131,7 @@ void DIIS::extrapolate(cublasHandle_t blas, const double* d_S,
       if (std::fabs(Bc[static_cast<size_t>(r + col * m)]) >
           std::fabs(Bc[static_cast<size_t>(pivot + col * m)]))
         pivot = r;
-    if (std::fabs(Bc[static_cast<size_t>(pivot + col * m)]) < 1e-20) {
+    if (std::fabs(Bc[static_cast<size_t>(pivot + col * m)]) < pivot_tol) {
       ok = false;
       break;
     }
@@ -146,7 +150,12 @@ void DIIS::extrapolate(cublasHandle_t blas, const double* d_S,
       rhsc[static_cast<size_t>(r)] -= f * rhsc[static_cast<size_t>(col)];
     }
   }
-  if (!ok) return;
+  if (!ok) {
+    // Singular / linearly dependent history: drop everything and keep the
+    // raw (pre-extrapolation) Fock that the caller still holds in d_Fock.
+    clear();
+    return;
+  }
 
   std::vector<double> coeffs(static_cast<size_t>(m), 0.0);
   for (int i = m - 1; i >= 0; i--) {
@@ -155,6 +164,9 @@ void DIIS::extrapolate(cublasHandle_t blas, const double* d_S,
       s -= Bc[static_cast<size_t>(i + j * m)] * coeffs[static_cast<size_t>(j)];
     coeffs[static_cast<size_t>(i)] = s / Bc[static_cast<size_t>(i + i * m)];
   }
+  // Undo the Jacobi scaling: actual c_i = dscale[i] * c'_i.
+  for (int i = 0; i < nvec; i++)
+    coeffs[static_cast<size_t>(i)] *= dscale[static_cast<size_t>(i)];
 
   // F_diis = F_hist * c[0:nvec]   (n2 × 1)
   CUDA_CHECK(cudaMemcpy(d_coeffs_, coeffs.data(),

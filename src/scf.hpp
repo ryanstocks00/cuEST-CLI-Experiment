@@ -9,6 +9,7 @@
 #include <iomanip>
 #include <iostream>
 #include <numeric>
+#include <utility>
 #include <vector>
 #include "cuest_wrapper/basis.hpp"
 #include "cuest_wrapper/context.hpp"
@@ -18,10 +19,10 @@
 
 namespace cuest {
 
-struct SADGuessConfig;
+struct SACGuessConfig;
 
 /// Cached [lo, hi) degenerate-frontier orbital range for one spin channel
-/// (see sad_guess.hpp) — detected once from the first, exactly-symmetric
+/// (see sac_guess.hpp) — detected once from the first, exactly-symmetric
 /// Hcore diagonalization, then held fixed for the rest of the SCF.
 struct FrontierGroup {
   int lo{-1};
@@ -31,13 +32,19 @@ struct FrontierGroup {
 
 struct SCFParams {
   int max_iter{250};
-  /// Threshold on the DIIS commutator RMS ||FDS-SDF|| (see DIIS::error_rms),
+  /// Threshold on the DIIS commutator RMS ||FDS-SDF|| (see DIIS::compute_residual),
   /// not density RMS — insensitive to harmless rotation within an exactly-
   /// degenerate occupied subspace, unlike a raw density-RMS criterion.
   double conv_thresh{1e-6};
   double energy_conv_thresh{1e-8};
   int diis_start{1};
-  int diis_max_space{15};
+  /// Large history windows make the Pulay DIIS solve numerically fragile
+  /// for near-degenerate open-shell systems (nearly-linearly-dependent
+  /// history vectors amplify floating-point noise into macroscopically
+  /// different iteration counts); 6 is fast and reproducible across the
+  /// validated systems, including hard radical cases, without regressing
+  /// well-behaved closed-shell molecules.
+  int diis_max_space{6};
   double damping{0.0};
   bool verbose{true};
   bool print_mos{false};
@@ -46,9 +53,9 @@ struct SCFParams {
   double break_symmetry{0.3};
   /// Use cuEST JIT kernels (DF-J, nuclear potential, …). Off ⇒ AOT + fp64.
   bool use_jit{true};
-  /// Force the zero-density (core Hamiltonian) initial guess, skipping SAD.
-  /// Used for the isolated-atom reference SCF that SAD itself calls (see
-  /// sad_guess.cpp) so it doesn't recurse into building its own SAD guess.
+  /// Force the zero-density (core Hamiltonian) initial guess, skipping SAC.
+  /// Used for the isolated-atom reference SCF that SAC itself calls (see
+  /// sac_guess.cpp) so it doesn't recurse into building its own SAC guess.
   bool force_hcore_guess{false};
   /// Suppress the machine-readable ENERGY_COMPONENTS block (printed
   /// unconditionally otherwise, even under --quiet). Used for the isolated
@@ -56,8 +63,8 @@ struct SCFParams {
   /// ahead of the real molecular result on stdout.
   bool suppress_output{false};
   /// Give every orbital in the HOMO/LUMO-straddling degenerate group equal
-  /// fractional occupation (see sad_guess.hpp) instead of a hard integer
-  /// cutoff, at *every* iteration. Needed for the isolated-atom SAD
+  /// fractional occupation (see sac_guess.hpp) instead of a hard integer
+  /// cutoff, at *every* iteration. Needed for the isolated-atom SAC
   /// reference: occupying one arbitrary real orbital out of a partially
   /// filled degenerate shell (e.g. only px, py of a p2 configuration) feeds
   /// an anisotropic density into J/K/Vxc, which then splits the degeneracy
@@ -67,15 +74,15 @@ struct SCFParams {
 
 class SCFSolver {
  public:
-  /// `sad_config`, if non-null, enables the atomic-superposition initial
-  /// guess (see sad_guess.hpp); must outlive this SCFSolver. Pass nullptr
+  /// `sac_config`, if non-null, enables the atomic-superposition initial
+  /// guess (see sac_guess.hpp); must outlive this SCFSolver. Pass nullptr
   /// (or set params.force_hcore_guess) to fall back to the core-Hamiltonian
   /// guess.
   SCFSolver(CuESTContext& ctx, BasisBuilder& basis,
             DFJKBuilder& dfjk, XCBuilder* xc,
             ECPBuilder* ecp_builder, ECPIntegrals* ecp_int,
             const Molecule& mol, SCFParams params,
-            const SADGuessConfig* sad_config = nullptr);
+            const SACGuessConfig* sac_config = nullptr);
   ~SCFSolver();
 
   void run();
@@ -96,31 +103,41 @@ class SCFSolver {
   uint64_t nocc() const { return uks_ ? nocc_a_ : nocc_; }
   const std::vector<double>& orbital_energies() const { return mo_energies_a_; }
   const std::vector<double>& orbital_energies_beta() const { return mo_energies_b_; }
+  /// [lo, hi) degenerate frontier group locked in during this SCF (only
+  /// meaningful when params.spherical_average_occupation was set); {-1,-1}
+  /// if never engaged. See FrontierGroup / sac_guess.hpp.
+  std::pair<int, int> frontier_group_alpha() const { return {sph_group_a_.lo, sph_group_a_.hi}; }
+  std::pair<int, int> frontier_group_beta() const { return {sph_group_b_.lo, sph_group_b_.hi}; }
   std::vector<double> mo_coefficients_host() {
     std::vector<double> C(nao_ * nao_);
-    cudaMemcpy(C.data(), d_C_a_.get(), nao_*nao_*sizeof(double), cudaMemcpyDeviceToHost);
+    CUDA_CHECK(cudaMemcpy(C.data(), d_C_a_.get(), nao_*nao_*sizeof(double),
+                          cudaMemcpyDeviceToHost));
     return C;
   }
   std::vector<double> mo_coefficients_beta_host() {
     std::vector<double> C(nao_ * nao_);
-    cudaMemcpy(C.data(), d_C_b_.get(), nao_*nao_*sizeof(double), cudaMemcpyDeviceToHost);
+    CUDA_CHECK(cudaMemcpy(C.data(), d_C_b_.get(), nao_*nao_*sizeof(double),
+                          cudaMemcpyDeviceToHost));
     return C;
   }
   /// Spin-α density (RKS: D_alpha; UKS: D_alpha). Gradients use D_alpha convention.
   std::vector<double> density_host() {
     std::vector<double> D(nao_ * nao_);
-    cudaMemcpy(D.data(), d_D_a_.get(), nao_*nao_*sizeof(double), cudaMemcpyDeviceToHost);
+    CUDA_CHECK(cudaMemcpy(D.data(), d_D_a_.get(), nao_*nao_*sizeof(double),
+                          cudaMemcpyDeviceToHost));
     return D;
   }
   std::vector<double> density_alpha_host() { return density_host(); }
   std::vector<double> density_beta_host() {
     std::vector<double> D(nao_ * nao_);
-    cudaMemcpy(D.data(), d_D_b_.get(), nao_*nao_*sizeof(double), cudaMemcpyDeviceToHost);
+    CUDA_CHECK(cudaMemcpy(D.data(), d_D_b_.get(), nao_*nao_*sizeof(double),
+                          cudaMemcpyDeviceToHost));
     return D;
   }
   std::vector<double> density_total_host() {
     std::vector<double> D(nao_ * nao_);
-    cudaMemcpy(D.data(), d_D_tot_.get(), nao_*nao_*sizeof(double), cudaMemcpyDeviceToHost);
+    CUDA_CHECK(cudaMemcpy(D.data(), d_D_tot_.get(), nao_*nao_*sizeof(double),
+                          cudaMemcpyDeviceToHost));
     return D;
   }
   uint64_t nao() const { return nao_; }
@@ -135,7 +152,7 @@ class SCFSolver {
                         std::vector<double>& mo_energies);
   void build_density(DeviceArray<double>& d_C, uint64_t nocc, DeviceArray<double>& d_D);
   /// Dispatches to build_density(), or to the spherically-averaged density
-  /// (sad_guess.hpp) when params_.spherical_average_occupation is set —
+  /// (sac_guess.hpp) when params_.spherical_average_occupation is set —
   /// in which case `group` is detected once (from the first call) and then
   /// held fixed; see FrontierGroup.
   void build_density_auto(DeviceArray<double>& d_C, uint64_t nocc,
@@ -143,12 +160,9 @@ class SCFSolver {
                           DeviceArray<double>& d_D, FrontierGroup& group);
   void form_total_density();
   void initial_guess();
-  /// Assemble the block-diagonal SAD guess density (from cached atomic
-  /// references, placed at basis_.ao_offsets()) and build d_Fock_a_/d_Fock_b_
-  /// as Hcore + J[D_guess]. K/Vxc are deliberately omitted here: they need
-  /// occupied MO coefficients, which don't exist until this Fock is
-  /// diagonalized for the first time.
-  void build_sad_guess_fock();
+  /// Place cached atomic weighted Cocc at AO offsets, rescale to the target
+  /// electron count, and upload D + Cocc for the first SCF Fock build.
+  void assemble_sac_guess();
   void break_beta_symmetry();
   /// Frobenius Tr(A^T B) ≡ ∑ A_ij B_ij (valid for symmetric energy matrices).
   double frobenius_dot(const double* d_A, const double* d_B, int n2);
@@ -162,7 +176,7 @@ class SCFSolver {
   ECPIntegrals* ecp_int_;
   const Molecule& mol_;
   SCFParams params_;
-  const SADGuessConfig* sad_config_;
+  const SACGuessConfig* sac_config_;
 
   cublasHandle_t cublas_{};
   cusolverDnHandle_t cusolver_{};
@@ -176,10 +190,14 @@ class SCFSolver {
   std::vector<double> mo_energies_a_, mo_energies_b_;
   int iter_{0};
   bool converged_{false};
+  /// First Fock uses SAC weighted Cocc (ncols may differ from nocc_*).
+  bool use_sac_cocc_{false};
+  uint64_t sac_ncols_a_{0}, sac_ncols_b_{0};
+  /// UKS: apply β HOMO/LUMO mix once after the first post-guess diagonalization.
+  bool symmetry_broken_{false};
 
   DeviceArray<double> d_Hcore_, d_S_, d_T_, d_V_, d_ECP_;
   DeviceArray<double> d_Fock_a_, d_Fock_b_;
-  DeviceArray<double> d_Fock_save_a_, d_Fock_save_b_;
   DeviceArray<double> d_D_a_, d_D_b_, d_D_tot_, d_D_old_a_, d_D_old_b_;
   DeviceArray<double> d_C_a_, d_C_b_;
   DeviceArray<double> d_Cocc_a_, d_Cocc_b_;

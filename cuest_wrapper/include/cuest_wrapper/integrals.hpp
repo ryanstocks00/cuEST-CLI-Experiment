@@ -103,7 +103,7 @@ class XCBuilder {
 
   XCBuilder(CuESTContext& ctx, cuestAOBasis_t basis,
              cuestMolecularGrid_t mol_grid,
-             int functional_id);
+             Functional functional);
 
   // RKS: restricted Kohn-Sham Vxc
   void compute_vxc_rks(uint64_t nocc, const double* d_Cocc,
@@ -121,18 +121,19 @@ class XCBuilder {
   // Query if functional is hybrid (has exact exchange)
   bool is_hybrid();
   bool is_lrc();            // has long-range correction
-  bool is_hf() const { return functional_id_ == XC_HF; }
+  bool is_hf() const { return functional_ == XC_HF; }
+  Functional functional() const { return functional_; }
   double exchange_scale();  // fraction of HF exchange for hybrids
 
  private:
-  static cuestXCIntPlanParametersFunctional_t to_cuest_functional(int id);
+  static cuestXCIntPlanParametersFunctional_t to_cuest_functional(Functional id);
 
   CuESTContext& ctx_;
   cuestMolecularGrid_t mol_grid_;  // raw handle, NOT owned (owned by caller)
   // persist outlives plan (destroyed last)
   Workspace xc_persist_ws_;
   XCIntPlanHandle plan_;
-  int functional_id_{-1};
+  Functional functional_{XC_PBE};
 };
 
 // ---------------------------------------------------------------------------

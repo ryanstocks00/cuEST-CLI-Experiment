@@ -11,6 +11,7 @@
  */
 
 #include <cuda_runtime.h>
+#include <cublas_v2.h>
 #include <cuest.h>
 
 #include <iostream>
@@ -44,6 +45,16 @@ inline void check_cuda(cudaError_t err, const char* expr,
   }
 }
 #define CUDA_CHECK(call) cuest::check_cuda((call), #call, __FILE__, __LINE__)
+
+inline void check_cublas(cublasStatus_t status, const char* expr,
+                         const char* file, int line) {
+  if (status != CUBLAS_STATUS_SUCCESS) {
+    throw std::runtime_error(std::string("cuBLAS error: ") + expr + " at " +
+                             file + ":" + std::to_string(line) + " code=" +
+                             std::to_string(static_cast<int>(status)));
+  }
+}
+#define CUBLAS_CHECK(call) cuest::check_cublas((call), #call, __FILE__, __LINE__)
 
 // ---------------------------------------------------------------------------
 // Forward declarations of parameter wrappers

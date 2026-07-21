@@ -74,7 +74,7 @@ add_executable(cuest_dft
   src/main.cpp
   src/scf.cpp
   src/diis.cpp
-  src/sad_guess.cpp
+  src/sac_guess.cpp
   src/basis_from_json.cpp
   src/basis_ecp_from_json.cpp
 )

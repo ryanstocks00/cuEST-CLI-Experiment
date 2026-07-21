@@ -1,8 +1,9 @@
 /**
- * @file sad_guess.cpp — isolated-atom UKS reference densities, disk-cached.
+ * @file sac_guess.cpp — isolated-atom UKS reference orbitals, disk-cached.
  */
-#include "sad_guess.hpp"
+#include "sac_guess.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -69,6 +70,26 @@ std::pair<int, int> degenerate_frontier_group(const std::vector<double>& mo_ener
   return {lo, hi};
 }
 
+std::vector<double> weighted_occupied_coefficients(const std::vector<double>& C,
+                                                   int lo, int hi,
+                                                   uint64_t nocc, uint64_t nao) {
+  const int N = static_cast<int>(nao);
+  std::vector<double> Cw(static_cast<size_t>(N) * std::max(hi, 0), 0.0);
+  if (hi <= 0) return Cw;
+
+  const int noccI = static_cast<int>(nocc);
+  const double w_partial =
+      (hi > lo) ? static_cast<double>(noccI - lo) / static_cast<double>(hi - lo) : 0.0;
+  const double s_partial = std::sqrt(std::max(w_partial, 0.0));
+
+  for (int k = 0; k < hi; k++) {
+    const double s = (k < lo) ? 1.0 : s_partial;
+    for (int i = 0; i < N; i++)
+      Cw[static_cast<size_t>(i) + static_cast<size_t>(k) * N] = s * C[static_cast<size_t>(i) + static_cast<size_t>(k) * N];
+  }
+  return Cw;
+}
+
 std::vector<double> spherically_averaged_density(const std::vector<double>& C,
                                                   int lo, int hi,
                                                   uint64_t nao, uint64_t nocc) {
@@ -76,65 +97,50 @@ std::vector<double> spherically_averaged_density(const std::vector<double>& C,
   std::vector<double> D(static_cast<size_t>(N) * N, 0.0);
   if (nocc == 0) return D;
 
-  const int noccI = static_cast<int>(nocc);
-  const double w_partial =
-      (hi > lo) ? static_cast<double>(noccI - lo) / static_cast<double>(hi - lo) : 0.0;
-
-  for (int k = 0; k < hi; k++) {
-    const double w = (k < lo) ? 1.0 : w_partial;
-    if (w == 0.0) continue;
+  const auto Cw = weighted_occupied_coefficients(C, lo, hi, nocc, nao);
+  for (int k = 0; k < hi; k++)
     for (int i = 0; i < N; i++)
       for (int j = 0; j < N; j++)
-        D[static_cast<size_t>(i) * N + j] += w * C[i + k * N] * C[j + k * N];
-  }
+        D[static_cast<size_t>(i) * N + j] +=
+            Cw[static_cast<size_t>(i) + static_cast<size_t>(k) * N] *
+            Cw[static_cast<size_t>(j) + static_cast<size_t>(k) * N];
   return D;
 }
 
 namespace {
 
 // ---------------------------------------------------------------------------
-// Disk cache: key = element + content hash of basis/aux + guess parameters.
+// Disk cache: key = element + basis/aux-basis file names + guess parameters.
+// Keyed on filename, not file content: basis set files are static, versioned
+// data (a change means a new file/name in practice, not an in-place edit),
+// so this avoids reading and hashing the whole file just to build a cache
+// key. If you ever DO hand-edit a basis JSON in place, clear the cache dir.
 // ---------------------------------------------------------------------------
-uint64_t fnv1a(const void* data, size_t n, uint64_t h = 1469598103934665603ULL) {
-  const auto* p = static_cast<const unsigned char*>(data);
-  for (size_t i = 0; i < n; i++) {
-    h ^= p[i];
-    h *= 1099511628211ULL;
-  }
-  return h;
-}
-
-uint64_t hash_file(const std::string& path) {
-  std::ifstream in(path, std::ios::binary);
-  if (!in) throw std::runtime_error("SAD guess: cannot open '" + path + "'");
-  std::ostringstream ss;
-  ss << in.rdbuf();
-  const std::string contents = ss.str();
-  return fnv1a(contents.data(), contents.size());
-}
-
 std::string cache_dir() {
-  if (const char* env = std::getenv("CUEST_SAD_CACHE_DIR"); env && *env)
+  if (const char* env = std::getenv("CUEST_SAC_CACHE_DIR"); env && *env)
     return env;
   if (const char* xdg = std::getenv("XDG_CACHE_HOME"); xdg && *xdg)
-    return std::string(xdg) + "/cuest_dft/sad_guess";
+    return std::string(xdg) + "/cuest_dft/sac_guess";
   const char* home = std::getenv("HOME");
-  return std::string(home ? home : ".") + "/.cache/cuest_dft/sad_guess";
+  return std::string(home ? home : ".") + "/.cache/cuest_dft/sac_guess";
 }
 
-std::string cache_key(int Z, const SADGuessConfig& cfg, uint64_t basis_hash,
-                       uint64_t aux_hash) {
+std::string cache_key(int Z, const SACGuessConfig& cfg) {
+  namespace fs = std::filesystem;
   std::ostringstream ss;
-  ss << "Z" << Z << "_f" << cfg.functional_id << "_r" << cfg.radial_pts << "a"
-     << cfg.angular_pts << "_p" << (cfg.is_pure ? 1 : 0) << "_j"
-     << (cfg.use_jit ? 1 : 0) << "_b" << std::hex << basis_hash << "_x"
-     << std::hex << aux_hash;
+  ss << "Z" << Z
+     << "_" << fs::path(cfg.basis_path).stem().string()
+     << "_" << fs::path(cfg.aux_basis_path).stem().string()
+     << "_f" << static_cast<int>(cfg.functional)
+     << "_r" << cfg.radial_pts << "a" << cfg.angular_pts
+     << "_p" << (cfg.is_pure ? 1 : 0)
+     << "_j" << (cfg.use_jit ? 1 : 0);
   return ss.str();
 }
 
-constexpr uint32_t kCacheMagic = 0x53414432u;  // "SAD2"
+constexpr uint32_t kCacheMagic = 0x53414331u;  // "SAC1"
 
-bool try_load_cache(const std::string& path, int Z, AtomicGuessDensity& out) {
+bool try_load_cache(const std::string& path, int Z, AtomicGuessOrbitals& out) {
   std::ifstream in(path, std::ios::binary | std::ios::ate);
   if (!in) return false;
   const std::streamsize total = in.tellg();
@@ -142,31 +148,35 @@ bool try_load_cache(const std::string& path, int Z, AtomicGuessDensity& out) {
 
   uint32_t magic = 0;
   int32_t zz = 0;
-  uint64_t nao = 0;
-  const std::streamsize header =
-      static_cast<std::streamsize>(sizeof(magic) + sizeof(zz) + sizeof(nao));
+  uint64_t nao = 0, n_cols_a = 0, n_cols_b = 0;
+  const std::streamsize header = static_cast<std::streamsize>(
+      sizeof(magic) + sizeof(zz) + sizeof(nao) + sizeof(n_cols_a) + sizeof(n_cols_b));
   if (total < header) return false;
 
   in.read(reinterpret_cast<char*>(&magic), sizeof(magic));
   in.read(reinterpret_cast<char*>(&zz), sizeof(zz));
   in.read(reinterpret_cast<char*>(&nao), sizeof(nao));
+  in.read(reinterpret_cast<char*>(&n_cols_a), sizeof(n_cols_a));
+  in.read(reinterpret_cast<char*>(&n_cols_b), sizeof(n_cols_b));
   if (!in || magic != kCacheMagic || zz != Z || nao == 0) return false;
 
-  const std::streamsize expected =
-      header + 2 * static_cast<std::streamsize>(nao * nao * sizeof(double));
+  const std::streamsize expected = header + static_cast<std::streamsize>(
+      (nao * n_cols_a + nao * n_cols_b) * sizeof(double));
   if (total != expected) return false;
 
   out.nao = nao;
-  out.D_alpha.resize(nao * nao);
-  out.D_beta.resize(nao * nao);
-  in.read(reinterpret_cast<char*>(out.D_alpha.data()),
-          static_cast<std::streamsize>(sizeof(double) * nao * nao));
-  in.read(reinterpret_cast<char*>(out.D_beta.data()),
-          static_cast<std::streamsize>(sizeof(double) * nao * nao));
+  out.n_cols_alpha = n_cols_a;
+  out.n_cols_beta = n_cols_b;
+  out.Cocc_alpha.resize(nao * n_cols_a);
+  out.Cocc_beta.resize(nao * n_cols_b);
+  in.read(reinterpret_cast<char*>(out.Cocc_alpha.data()),
+          static_cast<std::streamsize>(sizeof(double) * out.Cocc_alpha.size()));
+  in.read(reinterpret_cast<char*>(out.Cocc_beta.data()),
+          static_cast<std::streamsize>(sizeof(double) * out.Cocc_beta.size()));
   return in.good() || in.eof();
 }
 
-void write_cache(const std::string& path, int Z, const AtomicGuessDensity& d) {
+void write_cache(const std::string& path, int Z, const AtomicGuessOrbitals& d) {
   namespace fs = std::filesystem;
   std::error_code ec;
   fs::create_directories(fs::path(path).parent_path(), ec);
@@ -178,14 +188,16 @@ void write_cache(const std::string& path, int Z, const AtomicGuessDensity& d) {
     if (!out) return;  // best-effort cache; missing write access isn't fatal
     const uint32_t magic = kCacheMagic;
     const int32_t zz = Z;
-    const uint64_t nao = d.nao;
+    const uint64_t nao = d.nao, n_cols_a = d.n_cols_alpha, n_cols_b = d.n_cols_beta;
     out.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
     out.write(reinterpret_cast<const char*>(&zz), sizeof(zz));
     out.write(reinterpret_cast<const char*>(&nao), sizeof(nao));
-    out.write(reinterpret_cast<const char*>(d.D_alpha.data()),
-              static_cast<std::streamsize>(sizeof(double) * d.D_alpha.size()));
-    out.write(reinterpret_cast<const char*>(d.D_beta.data()),
-              static_cast<std::streamsize>(sizeof(double) * d.D_beta.size()));
+    out.write(reinterpret_cast<const char*>(&n_cols_a), sizeof(n_cols_a));
+    out.write(reinterpret_cast<const char*>(&n_cols_b), sizeof(n_cols_b));
+    out.write(reinterpret_cast<const char*>(d.Cocc_alpha.data()),
+              static_cast<std::streamsize>(sizeof(double) * d.Cocc_alpha.size()));
+    out.write(reinterpret_cast<const char*>(d.Cocc_beta.data()),
+              static_cast<std::streamsize>(sizeof(double) * d.Cocc_beta.size()));
     if (!out) {
       std::error_code rm_ec;
       fs::remove(tmp_path, rm_ec);
@@ -202,8 +214,10 @@ void write_cache(const std::string& path, int Z, const AtomicGuessDensity& d) {
 // ---------------------------------------------------------------------------
 // Isolated-atom UKS reference SCF.
 // ---------------------------------------------------------------------------
-AtomicGuessDensity compute_atomic_density(CuESTContext& ctx, int Z,
-                                          const SADGuessConfig& cfg) {
+AtomicGuessOrbitals compute_atomic_orbitals(CuESTContext& ctx, int Z,
+                                            const SACGuessConfig& cfg,
+                                            bool& converged) {
+  converged = false;
   Molecule mol;
   mol.add_atom_bohr(Z, 0.0, 0.0, 0.0);
   mol.set_charge(0);
@@ -212,17 +226,18 @@ AtomicGuessDensity compute_atomic_density(CuESTContext& ctx, int Z,
   atom_basis.build_from_json(cfg.basis_path);
   const uint64_t nao = atom_basis.nao();
 
-  AtomicGuessDensity result;
+  AtomicGuessOrbitals result;
   result.nao = nao;
-  result.D_alpha.assign(nao * nao, 0.0);
-  result.D_beta.assign(nao * nao, 0.0);
 
   ECPBuilder ecp_builder(ctx, mol);
   ecp_builder.build_from_json(cfg.basis_path);
   const int n_ecp = static_cast<int>(ecp_builder.total_ecp_electrons());
 
   const int nelec = mol.nelec(n_ecp);
-  if (nelec <= 0) return result;  // fully ECP-replaced core; no electrons to place
+  if (nelec <= 0) {
+    converged = true;  // fully ECP-replaced core; nothing to solve
+    return result;
+  }
 
   const int mult = aufbau_hund_multiplicity(nelec);
   mol.set_multiplicity(mult);
@@ -241,10 +256,10 @@ AtomicGuessDensity compute_atomic_density(CuESTContext& ctx, int Z,
   GridBuilder grid_builder(ctx, mol, cfg.radial_pts, cfg.angular_pts);
   auto mol_grid = grid_builder.build();
 
-  XCBuilder xc(ctx, atom_basis.basis(), mol_grid, cfg.functional_id);
+  XCBuilder xc(ctx, atom_basis.basis(), mol_grid, cfg.functional);
 
   double ex_frac = 0.0, lrc_frac = 0.0, lrc_omega = 0.0;
-  hybrid_dfjk_fractions(cfg.functional_id, xc, ex_frac, lrc_frac, lrc_omega);
+  hybrid_dfjk_fractions(cfg.functional, xc, ex_frac, lrc_frac, lrc_omega);
 
   auto xyz = mol.xyz_host();
   DFJKBuilder dfjk(ctx, atom_basis.basis(), aux_basis.basis(), xyz.data(),
@@ -254,11 +269,11 @@ AtomicGuessDensity compute_atomic_density(CuESTContext& ctx, int Z,
   sp.verbose = false;
   sp.print_mos = false;
   sp.print_level = 0;
-  sp.force_hcore_guess = true;  // zero-density guess: no SAD recursion
+  sp.force_hcore_guess = true;  // zero-density guess: no SAC recursion
   sp.suppress_output = true;    // don't interleave an ENERGY_COMPONENTS block
   sp.use_jit = cfg.use_jit;
-  // Open-shell atoms starting from a raw Hcore guess (no SAD to bootstrap
-  // from — this SCF *is* the SAD reference) oscillate more than molecules
+  // Open-shell atoms starting from a raw Hcore guess (no SAC to bootstrap
+  // from — this SCF *is* the SAC reference) oscillate more than molecules
   // do; damping + more iterations makes convergence reliable without
   // touching the main molecular SCF's defaults.
   sp.damping = 0.3;
@@ -274,32 +289,39 @@ AtomicGuessDensity compute_atomic_density(CuESTContext& ctx, int Z,
   SCFSolver atom_scf(ctx, atom_basis, dfjk, &xc, &ecp_builder, ecp_int.get(),
                      mol, sp);
   atom_scf.run();
-  if (!atom_scf.converged()) {
-    std::cerr << "Warning: atomic SAD reference for Z=" << Z
-              << " did not converge; using best-effort density for the guess.\n";
+  converged = atom_scf.converged();
+  if (!converged) {
+    std::cerr << "Warning: atomic SAC reference for Z=" << Z
+              << " did not converge; using best-effort orbitals for the guess.\n";
   }
 
-  // spherical_average_occupation above means d_D_a_/d_D_b_ are already the
-  // spherically-averaged density at self-consistency — no post-hoc fixup.
-  result.D_alpha = atom_scf.density_alpha_host();
-  result.D_beta = atom_scf.density_beta_host();
+  // spherical_average_occupation above means the frontier group locked in
+  // during convergence is exactly the atom's true degenerate shell (its own
+  // Fock is exactly rotationally symmetric throughout) — reuse it directly
+  // rather than re-deriving from the final eigenvalues.
+  const auto [lo_a, hi_a] = atom_scf.frontier_group_alpha();
+  const auto [lo_b, hi_b] = atom_scf.frontier_group_beta();
+  result.n_cols_alpha = static_cast<uint64_t>(std::max(hi_a, 0));
+  result.n_cols_beta = static_cast<uint64_t>(std::max(hi_b, 0));
+  result.Cocc_alpha = weighted_occupied_coefficients(
+      atom_scf.mo_coefficients_host(), lo_a, hi_a, atom_scf.nocc_alpha(), nao);
+  result.Cocc_beta = weighted_occupied_coefficients(
+      atom_scf.mo_coefficients_beta_host(), lo_b, hi_b, atom_scf.nocc_beta(), nao);
   return result;
 }
 
 }  // namespace
 
-AtomicGuessDensity get_atomic_guess_density(CuESTContext& ctx, int Z,
-                                            const SADGuessConfig& cfg) {
-  const uint64_t basis_hash = hash_file(cfg.basis_path);
-  const uint64_t aux_hash = hash_file(cfg.aux_basis_path);
-  const std::string path =
-      cache_dir() + "/" + cache_key(Z, cfg, basis_hash, aux_hash) + ".sad";
+AtomicGuessOrbitals get_atomic_guess_orbitals(CuESTContext& ctx, int Z,
+                                              const SACGuessConfig& cfg) {
+  const std::string path = cache_dir() + "/" + cache_key(Z, cfg) + ".sac";
 
-  AtomicGuessDensity result;
+  AtomicGuessOrbitals result;
   if (try_load_cache(path, Z, result)) return result;
 
-  result = compute_atomic_density(ctx, Z, cfg);
-  write_cache(path, Z, result);
+  bool converged = false;
+  result = compute_atomic_orbitals(ctx, Z, cfg, converged);
+  if (converged) write_cache(path, Z, result);
   return result;
 }
 

@@ -18,37 +18,19 @@
 #include <string>
 #include <vector>
 #include "cuest_wrapper/constants.hpp"
+#include "cuest_wrapper/integrals.hpp"
 #include "cuest_wrapper/molecule.hpp"
+#include "functionals.hpp"
 #include "scf.hpp"
 
 namespace cuest {
-
-// Map functional ID → CLI name (must match kFunctionals in main.cpp)
-static const char* functional_id_to_name(int id) {
-  switch (id) {
-    case 0:  return "PBE";
-    case 1:  return "B3LYP";
-    case 2:  return "B3LYP5";
-    case 3:  return "PBE0";
-    case 4:  return "CAM-B3LYP";
-    case 5:  return "WB97X-V";
-    case 6:  return "WB97M-V";
-    case 7:  return "HSE06";
-    case 8:  return "M06";
-    case 9:  return "M06-2X";
-    case 10: return "LC-WPBE";
-    case 11: return "LC-WPBEH";
-    case 12: return "WB97X";
-    default: return "PBE";
-  }
-}
 
 // Numerical gradient by spawning cuEST binary as subprocesses.
 // Uses the SAME binary, basis, and settings as the analytical gradient.
 inline std::vector<double> numerical_gradient(
     const Molecule& mol, const std::string& basis_path,
     const std::string& aux_path,
-    int func_id, int rad_pts, int ang_pts,
+    XCBuilder::Functional functional, int rad_pts, int ang_pts,
     struct SCFParams params, bool quiet,
     const std::string& binary_path = "build/cuest_dft",
     int is_pure = 1)
@@ -58,7 +40,7 @@ inline std::vector<double> numerical_gradient(
   double delta_bohr = delta * constants::bohr_per_angstrom;
   std::vector<double> forces(natom*3, 0.0);
 
-  const char* func_name = functional_id_to_name(func_id);
+  const char* func_name = functional_to_name(functional);
 
   for (size_t a = 0; a < natom; a++) {
     for (int xyz = 0; xyz < 3; xyz++) {

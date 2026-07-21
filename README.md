@@ -101,11 +101,11 @@ Optional arguments:
   --break-symmetry <rad>   UKS β HOMO/LUMO mix angle (default: 0.3)
 
 SCF convergence options:
-  --max-iter <n>           Max SCF iterations (default: 150)
-  --conv-thresh <val>      RMS density convergence (default: 1e-8)
+  --max-iter <n>           Max SCF iterations (default: 250)
+  --conv-thresh <val>      DIIS error |FDS-SDF| convergence (default: 1e-6)
   --energy-conv <val>      Energy change convergence (default: 1e-8)
   --diis-start <n>         Iteration to enable DIIS (default: 1)
-  --diis-space <n>         DIIS subspace dimension (default: 10)
+  --diis-space <n>         DIIS subspace dimension (default: 6)
   --damping <val>          Density damping factor (default: 0.0)
 
 Other options:
@@ -117,9 +117,9 @@ Other options:
 
 Notes:
   Density fitting is required. Closed-shell RKS (multiplicity 1) and
-  unrestricted UKS (multiplicity > 1) are supported. For broken-symmetry
-  singlets (nα = nβ), `--break-symmetry` mixes the β HOMO/LUMO on the
-  initial guess; ordinary open-shell (nα ≠ nβ) skips that mix. Analytic
+  unrestricted UKS (multiplicity > 1) are supported. For UKS,
+  `--break-symmetry` mixes the β HOMO/LUMO after the first diagonalization
+  (including open-shell radicals with a degenerate β frontier). Analytic
   gradients are available for both RKS and UKS (spherical orbitals).
   ECP data is auto-detected from the JSON basis.
 
@@ -211,7 +211,11 @@ cuest_wrapper/                 # Minimal C++ RAII over cuEST C API (STATIC)
 
 src/                           # CLI / application layer
 ├── main.cpp                   # cuest_dft entry point
+├── functionals.hpp            # CLI string ↔ XCBuilder::Functional registry
 ├── scf.hpp / scf.cpp          # SCF solver with DIIS + cuSOLVER
+├── diis.hpp / diis.cpp        # Device Pulay DIIS
+├── sac_guess.hpp / sac_guess.cpp  # SAC initial guess (cached atomic UKS)
+├── dfjk_hybrid.hpp            # Hybrid/LRC DF-JK exchange fractions
 ├── basis_from_json.cpp        # BasisBuilder / AuxBasis from BSE JSON
 ├── basis_ecp_from_json.cpp    # ECPBuilder from BSE JSON
 ├── grad_numerical.hpp         # FD gradients via subprocess

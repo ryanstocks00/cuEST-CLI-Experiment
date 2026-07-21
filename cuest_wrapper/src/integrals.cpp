@@ -192,7 +192,7 @@ void DFJKBuilder::compute_K(uint64_t nocc, const double* d_Cocc, double* d_K,
 // ---------------------------------------------------------------------------
 // XCBuilder
 // ---------------------------------------------------------------------------
-cuestXCIntPlanParametersFunctional_t XCBuilder::to_cuest_functional(int id) {
+cuestXCIntPlanParametersFunctional_t XCBuilder::to_cuest_functional(Functional id) {
   switch (id) {
     case XC_HF:       return CUEST_XCINTPLAN_PARAMETERS_FUNCTIONAL_HF;
     case XC_PBE:      return CUEST_XCINTPLAN_PARAMETERS_FUNCTIONAL_PBE;
@@ -214,14 +214,14 @@ cuestXCIntPlanParametersFunctional_t XCBuilder::to_cuest_functional(int id) {
 
 XCBuilder::XCBuilder(CuESTContext& ctx, cuestAOBasis_t basis,
                        cuestMolecularGrid_t mol_grid,
-                       int functional_id)
-    : ctx_(ctx), mol_grid_(mol_grid), functional_id_(functional_id) {
+                       Functional functional)
+    : ctx_(ctx), mol_grid_(mol_grid), functional_(functional) {
   cuestWorkspaceDescriptor_t pers_desc{}, temp_desc{};
   XCIntPlanParams xc_params;
 
   CUEST_CHECK(cuestXCIntPlanCreateWorkspaceQuery(
       ctx_, basis, mol_grid_,
-      to_cuest_functional(functional_id),
+      to_cuest_functional(functional),
       xc_params,
       &pers_desc, &temp_desc, plan_.ptr()));
 
@@ -231,7 +231,7 @@ XCBuilder::XCBuilder(CuESTContext& ctx, cuestAOBasis_t basis,
   CUEST_NVTX("cuestXCIntPlanCreate",
              cuestXCIntPlanCreate(
                  ctx_, basis, mol_grid_,
-                 to_cuest_functional(functional_id),
+                 to_cuest_functional(functional),
                  xc_params,
                  xc_persist_ws_.ptr(), ctx_.scratch().ptr(), plan_.ptr()));
 }

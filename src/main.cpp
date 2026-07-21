@@ -24,37 +24,13 @@
 #include "cuest_wrapper/integrals.hpp"
 #include "cuest_wrapper/molecule.hpp"
 #include "dfjk_hybrid.hpp"
+#include "functionals.hpp"
 #include "io/parsers.hpp"
 #include "cuest_wrapper/raii.hpp"
-#include "sad_guess.hpp"
+#include "sac_guess.hpp"
 #include "scf.hpp"
 
 using namespace cuest;
-
-// ---------------------------------------------------------------------------
-// Functional name -> ID mapping
-// ---------------------------------------------------------------------------
-struct FunctionalInfo {
-  const char* name;
-  int id;
-};
-
-static const FunctionalInfo kFunctionals[] = {
-    {"HF",        XCBuilder::XC_HF},
-    {"PBE",       XCBuilder::XC_PBE},
-    {"B3LYP",     XCBuilder::XC_B3LYP},
-    {"B3LYP5",    XCBuilder::XC_B3LYP5},
-    {"PBE0",      XCBuilder::XC_PBE0},
-    {"CAM-B3LYP", XCBuilder::XC_CAM_B3LYP},
-    {"WB97X-V",   XCBuilder::XC_WB97X_V},
-    {"WB97M-V",   XCBuilder::XC_WB97M_V},
-    {"HSE06",     XCBuilder::XC_HSE06},
-    {"M06",       XCBuilder::XC_M06},
-    {"M06-2X",    XCBuilder::XC_M062X},
-    {"LC-WPBE",   XCBuilder::XC_LC_WPBE},
-    {"LC-WPBEH",  XCBuilder::XC_LC_WPBEH},
-    {"WB97X",     XCBuilder::XC_WB97X},
-};
 
 // ---------------------------------------------------------------------------
 // Print help
@@ -79,7 +55,7 @@ static void print_help(const char* prog) {
       << "  --conv-thresh <val>      DIIS error |FDS-SDF| convergence (default: 1e-6)\n"
       << "  --energy-conv <val>      Energy change convergence (default: 1e-8)\n"
       << "  --diis-start <n>         Iteration to enable DIIS (default: 1)\n"
-      << "  --diis-space <n>         DIIS subspace dimension (default: 15)\n"
+      << "  --diis-space <n>         DIIS subspace dimension (default: 6)\n"
       << "  --damping <val>          Density damping factor (default: 0.0)\n\n"
       << "Other options:\n"
       << "  --quiet                  Minimal output\n"
@@ -95,7 +71,8 @@ static void print_help(const char* prog) {
       << "Notes:\n"
       << "  Density fitting is required (--aux-basis). Closed-shell RKS\n"
       << "  (multiplicity 1) or unrestricted UKS (multiplicity > 1) are supported.\n"
-      << "  UKS: --break-symmetry mixes β HOMO/LUMO when nα=nβ (BS-UKS).\n"
+      << "  UKS: --break-symmetry mixes β HOMO/LUMO after the first diagonalization\n"
+      << "  (including open-shell radicals with a degenerate β frontier).\n"
       << "  Analytic gradients (RKS and UKS) via --gradient / --analytic-gradient.\n"
       << "  The DF auxiliary basis is always spherical; --cartesian applies\n"
       << "  to the orbital basis only.\n\n"
@@ -124,7 +101,7 @@ int main(int argc, char* argv[]) {
   double conv_thresh = 1e-6;
   double energy_conv = 1e-8;
   int diis_start = 1;
-  int diis_space = 15;
+  int diis_space = 6;
   double damping = 0.0;
   bool verbose = true;
   bool print_mos = false;
@@ -213,16 +190,10 @@ int main(int argc, char* argv[]) {
   }
 
   // --- Look up functional ---
-  int functional_id = XCBuilder::XC_PBE;
-  bool found_functional = false;
-  for (const auto& fi : kFunctionals) {
-    if (functional_name == fi.name) {
-      functional_id = fi.id;
-      found_functional = true;
-      break;
-    }
-  }
-  if (!found_functional) {
+  XCBuilder::Functional functional = XCBuilder::XC_PBE;
+  if (auto parsed = functional_from_name(functional_name)) {
+    functional = *parsed;
+  } else {
     std::cerr << "Warning: Unknown functional '" << functional_name
               << "'. Using PBE.\n";
   }
@@ -339,7 +310,7 @@ int main(int argc, char* argv[]) {
     auto mol_grid = grid_builder.build();
 
     // --- Build XC functional ---
-    XCBuilder xc(ctx, basis_builder.basis(), mol_grid, functional_id);
+    XCBuilder xc(ctx, basis_builder.basis(), mol_grid, functional);
     if (!quiet) {
       std::cout << "Functional: " << functional_name;
       if (xc.is_hybrid())
@@ -355,7 +326,7 @@ int main(int argc, char* argv[]) {
     auto xyz = mol.xyz_host();
 
     double ex_frac = 0.0, lrc_frac = 0.0, lrc_omega = 0.0;
-    hybrid_dfjk_fractions(functional_id, xc, ex_frac, lrc_frac, lrc_omega);
+    hybrid_dfjk_fractions(functional, xc, ex_frac, lrc_frac, lrc_omega);
 
     auto dfjk = std::make_unique<DFJKBuilder>(
         ctx, basis_builder.basis(), aux_basis->basis(),
@@ -388,18 +359,18 @@ int main(int argc, char* argv[]) {
     scf_params.use_jit = use_jit;
 
     // --- Run SCF ---
-    SADGuessConfig sad_cfg;
-    sad_cfg.basis_path = basis_path;
-    sad_cfg.aux_basis_path = aux_basis_path;
-    sad_cfg.functional_id = functional_id;
-    sad_cfg.radial_pts = radial_pts;
-    sad_cfg.angular_pts = angular_pts;
-    sad_cfg.is_pure = (is_pure != 0);
-    sad_cfg.use_jit = use_jit;
+    SACGuessConfig sac_cfg;
+    sac_cfg.basis_path = basis_path;
+    sac_cfg.aux_basis_path = aux_basis_path;
+    sac_cfg.functional = functional;
+    sac_cfg.radial_pts = radial_pts;
+    sac_cfg.angular_pts = angular_pts;
+    sac_cfg.is_pure = (is_pure != 0);
+    sac_cfg.use_jit = use_jit;
 
     SCFSolver scf(ctx, basis_builder, *dfjk_ptr, &xc,
                    ecp_builder_ptr, ecp_int_ptr,
-                   mol, scf_params, &sad_cfg);
+                   mol, scf_params, &sac_cfg);
     scf.run();
 
     // --- Gradient computation ---
@@ -460,7 +431,7 @@ int main(int argc, char* argv[]) {
         if (numerical_gradient_flag) {
           const char* exe_path = argv[0];
           auto forces = numerical_gradient(mol, basis_path, aux_basis_path,
-              functional_id, radial_pts, angular_pts,
+              functional, radial_pts, angular_pts,
               scf_params, quiet, exe_path, is_pure);
 
           std::cout << "\n=== Numerical Gradient (Ha/bohr) ===\n";
