@@ -11,7 +11,8 @@ import subprocess
 from pathlib import Path
 
 PROJ_DIR = Path(__file__).resolve().parent.parent
-MOLECULES_DIR = PROJ_DIR / "data" / "molecules"
+MOLECULES_ROOT = PROJ_DIR / "data" / "molecules"
+MOLECULES_DIR = MOLECULES_ROOT / "small"  # single-molecule smoke/validation set
 BASIS_DIR = PROJ_DIR / "data" / "basis_sets"
 BUILD_DIR = PROJ_DIR / "build"
 EXE = BUILD_DIR / "cuest_dft"

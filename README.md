@@ -74,7 +74,7 @@ python3 test/validate_cuest.py
 
 ```bash
 ./build/cuest_dft \
-  --xyz data/molecules/h2o.xyz \
+  --xyz data/molecules/small/h2o.xyz \
   --basis data/basis_sets/def2-svp.json \
   --aux-basis data/basis_sets/def2-universal-jkfit.json \
   --functional PBE \
@@ -159,7 +159,7 @@ python3 test/validate_hf.py
 python3 test/validate_uks.py            # full OH energy+grad sweep
 python3 test/validate_uks.py --quick    # def2SVP smoke
 # OH radical example:
-./build/cuest_dft --xyz data/molecules/oh.xyz \
+./build/cuest_dft --xyz data/molecules/small/oh.xyz \
   --basis data/basis_sets/def2-svp.json \
   --aux-basis data/basis_sets/def2-universal-jkfit.json \
   --functional PBE --multiplicity 2 --analytic-gradient
