@@ -54,12 +54,12 @@ void BasisBuilder::build_from_json(const std::string& json_path) {
       &pers_desc, &temp_desc, basis_.ptr()));
 
   persistent_ws_ = Workspace(pers_desc);
-  Workspace temp_ws(temp_desc);
+  ctx_.scratch().ensure(temp_desc);
   CUEST_NVTX("cuestAOBasisCreate",
              cuestAOBasisCreate(
                  static_cast<cuestHandle_t>(ctx_), natom, shells_per_atom.data(),
                  all_shells.data(), ao_params,
-                 persistent_ws_.ptr(), temp_ws.ptr(), basis_.ptr()));
+                 persistent_ws_.ptr(), ctx_.scratch().ptr(), basis_.ptr()));
 
   nao_ = basis_.query<uint64_t>(ctx_, CUEST_AOBASIS_NUM_AO);
   pair_list_ready_ = false;
@@ -105,12 +105,12 @@ void AuxBasis::build_from_json(const std::string& json_path) {
       &pers_desc, &temp_desc, basis_.ptr()));
 
   persist_ws_ = Workspace(pers_desc);
-  Workspace temp_ws(temp_desc);
+  ctx_.scratch().ensure(temp_desc);
   CUEST_NVTX("cuestAOBasisCreate",
              cuestAOBasisCreate(
                  static_cast<cuestHandle_t>(ctx_), natom, shells_per_atom.data(),
                  all_shells.data(), aux_params,
-                 persist_ws_.ptr(), temp_ws.ptr(), basis_.ptr()));
+                 persist_ws_.ptr(), ctx_.scratch().ptr(), basis_.ptr()));
 }
 
 const OwnedAOPairList& BasisBuilder::pair_list(double threshold) const {
@@ -127,11 +127,12 @@ const OwnedAOPairList& BasisBuilder::pair_list(double threshold) const {
       threshold, pl_params, &pers_desc, &temp_desc, pl.handle.ptr()));
 
   pl.persist = Workspace(pers_desc);
-  Workspace temp_ws(temp_desc);
+  ctx_.scratch().ensure(temp_desc);
   CUEST_NVTX("cuestAOPairListCreate",
              cuestAOPairListCreate(
                  static_cast<cuestHandle_t>(ctx_), basis_.get(), natom, xyz_h.data(),
-                 threshold, pl_params, pl.persist.ptr(), temp_ws.ptr(), pl.handle.ptr()));
+                 threshold, pl_params, pl.persist.ptr(), ctx_.scratch().ptr(),
+                 pl.handle.ptr()));
 
   pair_list_ = std::move(pl);
   pair_list_ready_ = true;

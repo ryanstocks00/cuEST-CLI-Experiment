@@ -178,10 +178,11 @@ inline GradientComputer::GradientComputer(
                         Cconcat.size() * sizeof(double), cudaMemcpyHostToDevice));
 }
 
-// Helper: allocate temp workspace, run derivative compute, free temp
+// Helper: grow pooled temp workspace, run derivative compute (no device sync)
 namespace {
 template <typename ParamsT, typename QueryFn, typename ComputeFn>
-void run_derivative(cuestWorkspaceDescriptor_t& var_buf,
+void run_derivative(Workspace& temp_ws,
+                    cuestWorkspaceDescriptor_t& var_buf,
                     ParamsT& params, cuestParametersType_t ptype,
                     QueryFn query, ComputeFn compute,
                     const char* label = "derivative") {
@@ -193,14 +194,12 @@ void run_derivative(cuestWorkspaceDescriptor_t& var_buf,
                              " workspace query failed with code " +
                              std::to_string(static_cast<int>(qst)));
   }
-  Workspace temp_ws(td);
-  CUDA_CHECK(cudaDeviceSynchronize());
+  temp_ws.ensure(td);
   cuestStatus_t st;
   {
     NvtxRange range(label);
     st = compute(&var_buf, temp_ws.ptr());
   }
-  CUDA_CHECK(cudaDeviceSynchronize());
   cuestParametersDestroy(ptype, params);
   if (st != CUEST_STATUS_SUCCESS)
     throw std::runtime_error(std::string("Gradient ") + label +
@@ -224,7 +223,11 @@ inline std::vector<double> GradientComputer::compute() {
   DeviceArray<double> d_ov(n3 * sizeof(double)), d_ke(n3 * sizeof(double));
   DeviceArray<double> d_po(n3 * sizeof(double)), d_p2(n3 * sizeof(double));
   DeviceArray<double> d_df(n3 * sizeof(double)), d_xc(n3 * sizeof(double));
+  DeviceArray<double> d_ecp_buf;
+  if (ecp_int_)
+    d_ecp_buf.alloc(n3 * sizeof(double));
 
+  Workspace& grad_temp_ws = ctx_.scratch();
   cuestWorkspaceDescriptor_t var_buf{};
   var_buf.deviceBufferSizeInBytes = kDefaultVariableBufBytes;
 
@@ -232,7 +235,7 @@ inline std::vector<double> GradientComputer::compute() {
   {
     cuestOverlapDerivativeComputeParameters_t p;
     CUEST_CHECK(cuestParametersCreate(CUEST_OVERLAPDERIVATIVECOMPUTE_PARAMETERS, &p));
-    run_derivative(var_buf, p, CUEST_OVERLAPDERIVATIVECOMPUTE_PARAMETERS,
+    run_derivative(grad_temp_ws, var_buf, p, CUEST_OVERLAPDERIVATIVECOMPUTE_PARAMETERS,
       [&](auto* /*vb*/, auto* td) {
         return cuestOverlapDerivativeComputeWorkspaceQuery(ctx_, oe.plan(), p, td, d_Wa_, nullptr);
       },
@@ -245,7 +248,7 @@ inline std::vector<double> GradientComputer::compute() {
   {
     cuestKineticDerivativeComputeParameters_t p;
     CUEST_CHECK(cuestParametersCreate(CUEST_KINETICDERIVATIVECOMPUTE_PARAMETERS, &p));
-    run_derivative(var_buf, p, CUEST_KINETICDERIVATIVECOMPUTE_PARAMETERS,
+    run_derivative(grad_temp_ws, var_buf, p, CUEST_KINETICDERIVATIVECOMPUTE_PARAMETERS,
       [&](auto* /*vb*/, auto* td) {
         return cuestKineticDerivativeComputeWorkspaceQuery(ctx_, oe.plan(), p, td, d_Da_, nullptr);
       },
@@ -265,7 +268,7 @@ inline std::vector<double> GradientComputer::compute() {
       cuestParametersConfigure(CUEST_POTENTIALDERIVATIVECOMPUTE_PARAMETERS, p,
           CUEST_POTENTIALDERIVATIVECOMPUTE_PARAMETERS_FFLOAT_USAGE_MODE, &ffloat, sizeof(ffloat));
     }
-    run_derivative(var_buf, p, CUEST_POTENTIALDERIVATIVECOMPUTE_PARAMETERS,
+    run_derivative(grad_temp_ws, var_buf, p, CUEST_POTENTIALDERIVATIVECOMPUTE_PARAMETERS,
       [&](auto* /*vb*/, auto* td) {
         return cuestPotentialDerivativeComputeWorkspaceQuery(ctx_, oe.plan(), p, td, natom_, dx, dq, d_Da_, nullptr, nullptr);
       },
@@ -275,20 +278,15 @@ inline std::vector<double> GradientComputer::compute() {
   }
 
   if (ecp_int_) {
-    DeviceArray<double> d_ecp(n3 * sizeof(double));
     cuestECPDerivativeComputeParameters_t p;
     CUEST_CHECK(cuestParametersCreate(CUEST_ECPDERIVATIVECOMPUTE_PARAMETERS, &p));
-    run_derivative(var_buf, p, CUEST_ECPDERIVATIVECOMPUTE_PARAMETERS,
+    run_derivative(grad_temp_ws, var_buf, p, CUEST_ECPDERIVATIVECOMPUTE_PARAMETERS,
       [&](auto* vb, auto* td) {
         return cuestECPDerivativeComputeWorkspaceQuery(ctx_, ecp_int_->plan(), p, vb, td, d_Da_, nullptr);
       },
       [&](auto* vb, auto* tw) {
-        return cuestECPDerivativeCompute(ctx_, ecp_int_->plan(), p, vb, tw, d_Da_, d_ecp);
+        return cuestECPDerivativeCompute(ctx_, ecp_int_->plan(), p, vb, tw, d_Da_, d_ecp_buf);
       }, "ecp");
-    ecp_.resize(n3);
-    cudaMemcpy(ecp_.data(), d_ecp, n3 * sizeof(double), cudaMemcpyDeviceToHost);
-  } else {
-    ecp_.assign(n3, 0.0);
   }
 
   // DF J/K derivative
@@ -334,7 +332,7 @@ inline std::vector<double> GradientComputer::compute() {
       cuestParametersConfigure(CUEST_DFSYMMETRICDERIVATIVECOMPUTE_PARAMETERS, p,
           CUEST_DFSYMMETRICDERIVATIVECOMPUTE_PARAMETERS_FFLOAT_USAGE_MODE, &ffloat, sizeof(ffloat));
     }
-    run_derivative(var_buf, p, CUEST_DFSYMMETRICDERIVATIVECOMPUTE_PARAMETERS,
+    run_derivative(grad_temp_ws, var_buf, p, CUEST_DFSYMMETRICDERIVATIVECOMPUTE_PARAMETERS,
       [&](auto* vb, auto* td) {
         return cuestDFSymmetricDerivativeComputeWorkspaceQuery(
             ctx_, dfjk_.plan(), p, vb, td, ds, d_Da_, cs, ncm, nocc_ptr, cmat, nullptr);
@@ -352,7 +350,7 @@ inline std::vector<double> GradientComputer::compute() {
       const uint64_t nocc_b_pad = std::max<uint64_t>(nocc_b_, 1);
       cuestXCDerivativeUKSComputeParameters_t p;
       CUEST_CHECK(cuestParametersCreate(CUEST_XCDERIVATIVEUKSCOMPUTE_PARAMETERS, &p));
-      run_derivative(var_buf, p, CUEST_XCDERIVATIVEUKSCOMPUTE_PARAMETERS,
+      run_derivative(grad_temp_ws, var_buf, p, CUEST_XCDERIVATIVEUKSCOMPUTE_PARAMETERS,
         [&](auto* vb, auto* td) {
           return cuestXCDerivativeUKSComputeWorkspaceQuery(
               ctx_, xc_builder_->plan(), p, vb, td,
@@ -366,7 +364,7 @@ inline std::vector<double> GradientComputer::compute() {
     } else {
       cuestXCDerivativeRKSComputeParameters_t p;
       CUEST_CHECK(cuestParametersCreate(CUEST_XCDERIVATIVERKSCOMPUTE_PARAMETERS, &p));
-      run_derivative(var_buf, p, CUEST_XCDERIVATIVERKSCOMPUTE_PARAMETERS,
+      run_derivative(grad_temp_ws, var_buf, p, CUEST_XCDERIVATIVERKSCOMPUTE_PARAMETERS,
         [&](auto* vb, auto* td) {
           return cuestXCDerivativeRKSComputeWorkspaceQuery(
               ctx_, xc_builder_->plan(), p, vb, td, nocc_, d_Co_, nullptr);
@@ -380,12 +378,18 @@ inline std::vector<double> GradientComputer::compute() {
     xc_.assign(n3, 0.0);
   }
 
-  cudaDeviceSynchronize();
+  // Final D2H pack (implicit sync)
   ov_.resize(n3); cudaMemcpy(ov_.data(), d_ov, n3 * sizeof(double), cudaMemcpyDeviceToHost);
   ke_.resize(n3); cudaMemcpy(ke_.data(), d_ke, n3 * sizeof(double), cudaMemcpyDeviceToHost);
   po_.resize(n3); cudaMemcpy(po_.data(), d_po, n3 * sizeof(double), cudaMemcpyDeviceToHost);
   pc_.resize(n3); cudaMemcpy(pc_.data(), d_p2, n3 * sizeof(double), cudaMemcpyDeviceToHost);
   df_.resize(n3); cudaMemcpy(df_.data(), d_df, n3 * sizeof(double), cudaMemcpyDeviceToHost);
+  if (ecp_int_) {
+    ecp_.resize(n3);
+    cudaMemcpy(ecp_.data(), d_ecp_buf, n3 * sizeof(double), cudaMemcpyDeviceToHost);
+  } else {
+    ecp_.assign(n3, 0.0);
+  }
   if (xc_builder_ && !xc_builder_->is_hf()) {
     xc_.resize(n3);
     cudaMemcpy(xc_.data(), d_xc, n3 * sizeof(double), cudaMemcpyDeviceToHost);

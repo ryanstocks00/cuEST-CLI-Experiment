@@ -115,13 +115,13 @@ inline MolecularGridHandle GridBuilder::build() {
       MolecularGridParams{}, &pers_desc, &temp_desc, mol_grid.ptr()));
 
   grid_persist_ws_ = Workspace(pers_desc);
-  Workspace temp_ws(temp_desc);
+  ctx_.scratch().ensure(temp_desc);
 
   CUEST_NVTX("cuestMolecularGridCreate",
              cuestMolecularGridCreate(
                  ctx_, natom, atom_grids.data(), xyz_h.data(),
-                 MolecularGridParams{}, grid_persist_ws_.ptr(), temp_ws.ptr(),
-                 mol_grid.ptr()));
+                 MolecularGridParams{}, grid_persist_ws_.ptr(),
+                 ctx_.scratch().ptr(), mol_grid.ptr()));
 
   // Atom grids can be destroyed; molecular grid has what it needs.
   atom_grid_handles.clear();

@@ -73,6 +73,7 @@ target_compile_options(cuest_wrapper PRIVATE
 add_executable(cuest_dft
   src/main.cpp
   src/scf.cpp
+  src/diis.cpp
   src/basis_from_json.cpp
   src/basis_ecp_from_json.cpp
 )

@@ -1,5 +1,5 @@
 /**
- * @file scf.cpp — RKS / UKS SCF with DIIS (cuSOLVER dsygvd). Application layer.
+ * @file scf.cpp — RKS / UKS SCF with device DIIS (cuSOLVER dsygvd).
  */
 #include "scf.hpp"
 #include "cuest_wrapper/nvtx.hpp"
@@ -50,28 +50,42 @@ SCFSolver::SCFSolver(CuESTContext& ctx, BasisBuilder& basis,
                      : mol_.nuclear_repulsion();
 
   size_t N2 = nao_ * nao_;
-  d_Hcore_.alloc(N2 * sizeof(double));
-  d_S_.alloc(N2 * sizeof(double));
-  d_T_.alloc(N2 * sizeof(double));
-  d_V_.alloc(N2 * sizeof(double));
-  d_ECP_.alloc(N2 * sizeof(double));
-  d_Fock_a_.alloc(N2 * sizeof(double));
-  d_Fock_b_.alloc(N2 * sizeof(double));
-  d_D_a_.alloc(N2 * sizeof(double));
-  d_D_b_.alloc(N2 * sizeof(double));
-  d_D_tot_.alloc(N2 * sizeof(double));
-  d_D_old_a_.alloc(N2 * sizeof(double));
-  d_D_old_b_.alloc(N2 * sizeof(double));
-  d_C_a_.alloc(N2 * sizeof(double));
-  d_C_b_.alloc(N2 * sizeof(double));
-  d_J_.alloc(N2 * sizeof(double));
-  d_K_a_.alloc(N2 * sizeof(double));
-  d_K_b_.alloc(N2 * sizeof(double));
-  d_Vxc_a_.alloc(N2 * sizeof(double));
-  d_Vxc_b_.alloc(N2 * sizeof(double));
+  size_t n2_bytes = N2 * sizeof(double);
+  d_Hcore_.alloc(n2_bytes);
+  d_S_.alloc(n2_bytes);
+  d_T_.alloc(n2_bytes);
+  d_V_.alloc(n2_bytes);
+  d_ECP_.alloc(n2_bytes);
+  d_Fock_a_.alloc(n2_bytes);
+  d_Fock_b_.alloc(n2_bytes);
+  d_Fock_save_a_.alloc(n2_bytes);
+  d_Fock_save_b_.alloc(n2_bytes);
+  d_D_a_.alloc(n2_bytes);
+  d_D_b_.alloc(n2_bytes);
+  d_D_tot_.alloc(n2_bytes);
+  d_D_old_a_.alloc(n2_bytes);
+  d_D_old_b_.alloc(n2_bytes);
+  d_C_a_.alloc(n2_bytes);
+  d_C_b_.alloc(n2_bytes);
+  d_J_.alloc(n2_bytes);
+  d_K_a_.alloc(n2_bytes);
+  d_K_b_.alloc(n2_bytes);
+  d_Vxc_a_.alloc(n2_bytes);
+  d_Vxc_b_.alloc(n2_bytes);
   d_eigvals_.alloc(nao_ * sizeof(double));
-  d_Fwork_.alloc(N2 * sizeof(double));
-  d_Swork_.alloc(N2 * sizeof(double));
+  d_Fwork_.alloc(n2_bytes);
+  d_Swork_.alloc(n2_bytes);
+  d_rms_scratch_.alloc(n2_bytes);
+  d_info_.alloc(sizeof(int));
+
+  // Occupied MO packs (pad empty UKS channel to 1 column of zeros).
+  const uint64_t nocc_a_pad = std::max<uint64_t>(uks_ ? nocc_a_ : nocc_, 1);
+  const uint64_t nocc_b_pad = std::max<uint64_t>(nocc_b_, 1);
+  d_Cocc_a_.alloc(nao_ * nocc_a_pad * sizeof(double));
+  d_Cocc_b_.alloc(nao_ * nocc_b_pad * sizeof(double));
+
+  diis_a_.init(params_.diis_max_space, static_cast<int>(nao_));
+  diis_b_.init(params_.diis_max_space, static_cast<int>(nao_));
 
   auto xyz_h = mol_.xyz_host();
   auto chg_h = ecp_cores ? mol_.charges_host(*ecp_cores) : mol_.charges_host();
@@ -79,10 +93,10 @@ SCFSolver::SCFSolver(CuESTContext& ctx, BasisBuilder& basis,
   d_charges_.alloc(chg_h.size() * sizeof(double));
   CUDA_CHECK(cudaMemcpy(d_xyz_, xyz_h.data(), xyz_h.size()*sizeof(double), cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(d_charges_, chg_h.data(), chg_h.size()*sizeof(double), cudaMemcpyHostToDevice));
-  CUDA_CHECK(cudaMemset(d_D_a_, 0, N2 * sizeof(double)));
-  CUDA_CHECK(cudaMemset(d_D_b_, 0, N2 * sizeof(double)));
-  CUDA_CHECK(cudaMemset(d_D_tot_, 0, N2 * sizeof(double)));
-  CUDA_CHECK(cudaMemset(d_ECP_, 0, N2 * sizeof(double)));
+  CUDA_CHECK(cudaMemset(d_D_a_, 0, n2_bytes));
+  CUDA_CHECK(cudaMemset(d_D_b_, 0, n2_bytes));
+  CUDA_CHECK(cudaMemset(d_D_tot_, 0, n2_bytes));
+  CUDA_CHECK(cudaMemset(d_ECP_, 0, n2_bytes));
 }
 
 SCFSolver::~SCFSolver() {
@@ -90,18 +104,25 @@ SCFSolver::~SCFSolver() {
   if (cusolver_) cusolverDnDestroy(cusolver_);
 }
 
-double SCFSolver::trace_dot(const double* d_A, const double* d_B, int N) {
-  std::vector<double> A(N*N), B(N*N);
-  cudaMemcpy(A.data(), d_A, N*N*sizeof(double), cudaMemcpyDeviceToHost);
-  cudaMemcpy(B.data(), d_B, N*N*sizeof(double), cudaMemcpyDeviceToHost);
-  double tr = 0.0;
-  for (int i = 0; i < N; i++)
-    for (int j = 0; j < N; j++)
-      tr += A[i*N+j] * B[j*N+i];
-  return tr;
+double SCFSolver::frobenius_dot(const double* d_A, const double* d_B, int n2) {
+  double result = 0.0;
+  cublasDdot(cublas_, n2, d_A, 1, d_B, 1, &result);
+  return result;
+}
+
+double SCFSolver::compute_rms_delta_device(const double* d_D,
+                                            const double* d_D_old, int n2) {
+  // scratch = D - D_old
+  cublasDcopy(cublas_, n2, d_D, 1, d_rms_scratch_, 1);
+  double minus_one = -1.0;
+  cublasDaxpy(cublas_, n2, &minus_one, d_D_old, 1, d_rms_scratch_, 1);
+  double ss = 0.0;
+  cublasDdot(cublas_, n2, d_rms_scratch_, 1, d_rms_scratch_, 1, &ss);
+  return std::sqrt(ss / static_cast<double>(n2));
 }
 
 void SCFSolver::build_core_hamiltonian() {
+  NvtxRange range("build_core_hamiltonian");
   const OwnedAOPairList& pair_list = basis_.pair_list();
   OneElectronIntegrals oe(ctx_, basis_.basis(), pair_list.get(), params_.use_jit);
   oe.compute_kinetic(d_T_);
@@ -120,7 +141,9 @@ void SCFSolver::build_core_hamiltonian() {
     std::cout << "Computing one-electron integrals...\n";
 }
 
-void SCFSolver::build_density(DeviceArray<double>& d_C, uint64_t nocc, DeviceArray<double>& d_D) {
+void SCFSolver::build_density(DeviceArray<double>& d_C, uint64_t nocc,
+                              DeviceArray<double>& d_D) {
+  NvtxRange range("build_density");
   int N = static_cast<int>(nao_);
   int Nocc = static_cast<int>(nocc);
   double one = 1.0, zero = 0.0;
@@ -140,35 +163,31 @@ void SCFSolver::form_total_density() {
   if (uks_)
     cublasDaxpy(cublas_, nao_*nao_, &one, d_D_b_, 1, d_D_tot_, 1);
   else {
-    // RKS: D_tot = 2 * D_alpha for reporting; internal D_a is D_alpha
     double two = 2.0;
     cublasDscal(cublas_, nao_*nao_, &two, d_D_tot_, 1);
   }
 }
 
 void SCFSolver::build_fock_rks() {
-  // D_a holds D_alpha; J from D_alpha with F = H + 2J - K + Vxc
+  NvtxRange range("build_fock_rks");
   dfjk_.compute_J(d_D_a_, d_J_);
 
   double two = 2.0;
   cublasDcopy(cublas_, nao_*nao_, d_Hcore_, 1, d_Fock_a_, 1);
   cublasDaxpy(cublas_, nao_*nao_, &two, d_J_, 1, d_Fock_a_, 1);
 
-  DeviceArray<double> d_Cocc;
-  d_Cocc.alloc(nao_ * nocc_ * sizeof(double));
-  CUDA_CHECK(cudaMemcpy(d_Cocc, d_C_a_, nao_ * nocc_ * sizeof(double),
+  CUDA_CHECK(cudaMemcpy(d_Cocc_a_, d_C_a_, nao_ * nocc_ * sizeof(double),
                         cudaMemcpyDeviceToDevice));
 
   if (xc_ && (xc_->is_hybrid() || xc_->is_hf())) {
     const double k_factor = -1.0;
-    dfjk_.compute_K(nocc_, d_Cocc, d_K_a_);
+    dfjk_.compute_K(nocc_, d_Cocc_a_, d_K_a_);
     cublasDaxpy(cublas_, nao_*nao_, &k_factor, d_K_a_, 1, d_Fock_a_, 1);
   }
 
-  // Pure HF: cuEST XC potential API rejects FUNCTIONAL_HF — Exc = 0.
   if (xc_ && !xc_->is_hf()) {
     double exc_val = 0.0;
-    xc_->compute_vxc_rks(nocc_, d_Cocc, &exc_val, d_Vxc_a_);
+    xc_->compute_vxc_rks(nocc_, d_Cocc_a_, &exc_val, d_Vxc_a_);
     e_xc_ = exc_val;
     double one = 1.0;
     cublasDaxpy(cublas_, nao_*nao_, &one, d_Vxc_a_, 1, d_Fock_a_, 1);
@@ -178,10 +197,7 @@ void SCFSolver::build_fock_rks() {
 }
 
 void SCFSolver::build_fock_uks() {
-  // J from total density D_a + D_b
-  form_total_density();
-  // form_total_density scales RKS; for UKS d_D_tot_ = D_a+D_b already via copy+axpy
-  // Recompute without the RKS ×2 path:
+  NvtxRange range("build_fock_uks");
   {
     double one = 1.0;
     cublasDcopy(cublas_, nao_*nao_, d_D_a_, 1, d_D_tot_, 1);
@@ -195,31 +211,27 @@ void SCFSolver::build_fock_uks() {
   cublasDaxpy(cublas_, nao_*nao_, &one, d_J_, 1, d_Fock_a_, 1);
   cublasDaxpy(cublas_, nao_*nao_, &one, d_J_, 1, d_Fock_b_, 1);
 
-  DeviceArray<double> d_Cocc_a, d_Cocc_b;
-  // cuEST UKS requires nocc > 0 for both channels; pad empty spin with zeros.
   uint64_t nocc_a_pad = std::max<uint64_t>(nocc_a_, 1);
   uint64_t nocc_b_pad = std::max<uint64_t>(nocc_b_, 1);
-  d_Cocc_a.alloc(nao_ * nocc_a_pad * sizeof(double));
-  d_Cocc_b.alloc(nao_ * nocc_b_pad * sizeof(double));
-  CUDA_CHECK(cudaMemset(d_Cocc_a, 0, nao_ * nocc_a_pad * sizeof(double)));
-  CUDA_CHECK(cudaMemset(d_Cocc_b, 0, nao_ * nocc_b_pad * sizeof(double)));
+  CUDA_CHECK(cudaMemset(d_Cocc_a_, 0, nao_ * nocc_a_pad * sizeof(double)));
+  CUDA_CHECK(cudaMemset(d_Cocc_b_, 0, nao_ * nocc_b_pad * sizeof(double)));
   if (nocc_a_ > 0)
-    CUDA_CHECK(cudaMemcpy(d_Cocc_a, d_C_a_, nao_ * nocc_a_ * sizeof(double),
+    CUDA_CHECK(cudaMemcpy(d_Cocc_a_, d_C_a_, nao_ * nocc_a_ * sizeof(double),
                           cudaMemcpyDeviceToDevice));
   if (nocc_b_ > 0)
-    CUDA_CHECK(cudaMemcpy(d_Cocc_b, d_C_b_, nao_ * nocc_b_ * sizeof(double),
+    CUDA_CHECK(cudaMemcpy(d_Cocc_b_, d_C_b_, nao_ * nocc_b_ * sizeof(double),
                           cudaMemcpyDeviceToDevice));
 
   if (xc_ && (xc_->is_hybrid() || xc_->is_hf())) {
     const double k_factor = -1.0;
     if (nocc_a_ > 0) {
-      dfjk_.compute_K(nocc_a_, d_Cocc_a, d_K_a_);
+      dfjk_.compute_K(nocc_a_, d_Cocc_a_, d_K_a_);
       cublasDaxpy(cublas_, nao_*nao_, &k_factor, d_K_a_, 1, d_Fock_a_, 1);
     } else {
       CUDA_CHECK(cudaMemset(d_K_a_, 0, nao_ * nao_ * sizeof(double)));
     }
     if (nocc_b_ > 0) {
-      dfjk_.compute_K(nocc_b_, d_Cocc_b, d_K_b_);
+      dfjk_.compute_K(nocc_b_, d_Cocc_b_, d_K_b_);
       cublasDaxpy(cublas_, nao_*nao_, &k_factor, d_K_b_, 1, d_Fock_b_, 1);
     } else {
       CUDA_CHECK(cudaMemset(d_K_b_, 0, nao_ * nao_ * sizeof(double)));
@@ -228,7 +240,7 @@ void SCFSolver::build_fock_uks() {
 
   if (xc_ && !xc_->is_hf()) {
     double exc_val = 0.0;
-    xc_->compute_vxc_uks(nocc_a_pad, nocc_b_pad, d_Cocc_a, d_Cocc_b,
+    xc_->compute_vxc_uks(nocc_a_pad, nocc_b_pad, d_Cocc_a_, d_Cocc_b_,
                          &exc_val, d_Vxc_a_, d_Vxc_b_);
     e_xc_ = exc_val;
     cublasDaxpy(cublas_, nao_*nao_, &one, d_Vxc_a_, 1, d_Fock_a_, 1);
@@ -238,8 +250,10 @@ void SCFSolver::build_fock_uks() {
   }
 }
 
-void SCFSolver::diagonalize_fock(DeviceArray<double>& d_Fock, DeviceArray<double>& d_C,
+void SCFSolver::diagonalize_fock(DeviceArray<double>& d_Fock,
+                                 DeviceArray<double>& d_C,
                                  std::vector<double>& mo_energies) {
+  NvtxRange range("diagonalize_fock");
   int N = static_cast<int>(nao_);
   int lda = N;
 
@@ -252,20 +266,18 @@ void SCFSolver::diagonalize_fock(DeviceArray<double>& d_Fock, DeviceArray<double
       N, d_Fwork_, lda, d_Swork_, lda,
       d_eigvals_, &lwork);
 
-  double* d_work = nullptr;
-  CUDA_CHECK(cudaMalloc(&d_work, lwork * sizeof(double)));
-  int* d_info = nullptr;
-  CUDA_CHECK(cudaMalloc(&d_info, sizeof(int)));
+  if (lwork > syev_lwork_) {
+    d_syev_work_.alloc(static_cast<size_t>(lwork) * sizeof(double));
+    syev_lwork_ = lwork;
+  }
 
   cusolverStatus_t st = cusolverDnDsygvd(cusolver_, CUSOLVER_EIG_TYPE_1,
       CUSOLVER_EIG_MODE_VECTOR, CUBLAS_FILL_MODE_LOWER,
       N, d_Fwork_, lda, d_Swork_, lda,
-      d_eigvals_, d_work, lwork, d_info);
+      d_eigvals_, d_syev_work_, syev_lwork_, d_info_);
 
   int info_h = 0;
-  CUDA_CHECK(cudaMemcpy(&info_h, d_info, sizeof(int), cudaMemcpyDeviceToHost));
-  CUDA_CHECK(cudaFree(d_work));
-  CUDA_CHECK(cudaFree(d_info));
+  CUDA_CHECK(cudaMemcpy(&info_h, d_info_, sizeof(int), cudaMemcpyDeviceToHost));
 
   if (st != CUSOLVER_STATUS_SUCCESS || info_h != 0) {
     throw std::runtime_error(
@@ -274,15 +286,12 @@ void SCFSolver::diagonalize_fock(DeviceArray<double>& d_Fock, DeviceArray<double
   }
 
   cublasDcopy(cublas_, N*N, d_Fwork_, 1, d_C, 1);
-  mo_energies.resize(N);
-  cudaMemcpy(mo_energies.data(), d_eigvals_, N*sizeof(double), cudaMemcpyDeviceToHost);
+  mo_energies.resize(static_cast<size_t>(N));
+  cudaMemcpy(mo_energies.data(), d_eigvals_,
+             static_cast<size_t>(N) * sizeof(double), cudaMemcpyDeviceToHost);
 }
 
 void SCFSolver::break_beta_symmetry() {
-  // Mix β HOMO with LUMO to break α/β equivalence on the initial guess.
-  // Only useful when nα == nβ (broken-symmetry singlets). For ordinary
-  // open-shell (nα ≠ nβ) the guess is already spin-polarized; mixing here
-  // can destabilize DIIS on small bases.
   if (nocc_a_ != nocc_b_) return;
   if (nocc_b_ == 0 || nocc_b_ >= nao_) return;
   double theta = params_.break_symmetry;
@@ -307,16 +316,17 @@ void SCFSolver::break_beta_symmetry() {
 }
 
 void SCFSolver::initial_guess() {
+  NvtxRange range("initial_guess");
   bool use_hcore = (ecp_builder_ && ecp_builder_->has_ecp());
   int N = static_cast<int>(nao_);
 
   if (use_hcore) {
     cublasDcopy(cublas_, N*N, d_Hcore_, 1, d_Fock_a_, 1);
   } else {
-    // SAD-like diagonal guess mixed into Hcore
-    std::vector<double> S_h(N*N);
-    cudaMemcpy(S_h.data(), d_S_, N*N*sizeof(double), cudaMemcpyDeviceToHost);
-    std::vector<double> D_sad(N*N, 0.0);
+    std::vector<double> S_h(static_cast<size_t>(N*N));
+    cudaMemcpy(S_h.data(), d_S_, static_cast<size_t>(N*N)*sizeof(double),
+               cudaMemcpyDeviceToHost);
+    std::vector<double> D_sad(static_cast<size_t>(N*N), 0.0);
     std::vector<int> ao_per_atom(mol_.natom(), 0), ao_start(mol_.natom(), 0);
     int ao_fill = 0;
     for (size_t a = 0; a < mol_.natom(); a++) {
@@ -341,21 +351,23 @@ void SCFSolver::initial_guess() {
       if (count <= 0) continue;
       double occ = static_cast<double>(nv) / count * 0.5;
       for (int i = start; i < start + count && i < N; i++)
-        D_sad[i*N + i] = occ;
+        D_sad[static_cast<size_t>(i*N + i)] = occ;
     }
     double trDS = 0.0;
     for (int i = 0; i < N; i++)
       for (int j = 0; j < N; j++)
-        trDS += D_sad[i*N+j] * S_h[j*N+i];
+        trDS += D_sad[static_cast<size_t>(i*N+j)] * S_h[static_cast<size_t>(j*N+i)];
     double target = uks_ ? static_cast<double>(nocc_a_) : static_cast<double>(nocc_);
     double scale = target / std::max(trDS, 1e-10);
     for (auto& d : D_sad) d *= scale;
 
-    std::vector<double> F_init(N*N);
-    cudaMemcpy(F_init.data(), d_Hcore_, N*N*sizeof(double), cudaMemcpyDeviceToHost);
+    std::vector<double> F_init(static_cast<size_t>(N*N));
+    cudaMemcpy(F_init.data(), d_Hcore_, static_cast<size_t>(N*N)*sizeof(double),
+               cudaMemcpyDeviceToHost);
     const double mix = 0.5;
-    for (int i = 0; i < N*N; i++) F_init[i] += mix * D_sad[i];
-    cudaMemcpy(d_Fock_a_, F_init.data(), N*N*sizeof(double), cudaMemcpyHostToDevice);
+    for (int i = 0; i < N*N; i++) F_init[static_cast<size_t>(i)] += mix * D_sad[static_cast<size_t>(i)];
+    cudaMemcpy(d_Fock_a_, F_init.data(), static_cast<size_t>(N*N)*sizeof(double),
+               cudaMemcpyHostToDevice);
   }
 
   diagonalize_fock(d_Fock_a_, d_C_a_, mo_energies_a_);
@@ -371,103 +383,6 @@ void SCFSolver::initial_guess() {
     cublasDcopy(cublas_, N*N, d_D_a_, 1, d_D_b_, 1);
     mo_energies_b_ = mo_energies_a_;
   }
-}
-
-double SCFSolver::compute_rms_delta(const std::vector<double>& D_new,
-                                     const std::vector<double>& D_old) {
-  double sum = 0.0;
-  for (size_t i = 0; i < D_new.size(); i++) {
-    double diff = D_new[i] - D_old[i];
-    sum += diff * diff;
-  }
-  return std::sqrt(sum / D_new.size());
-}
-
-void SCFSolver::diis_extrapolate(std::vector<std::vector<double>>& errs,
-                                 std::vector<std::vector<double>>& focks,
-                                 const std::vector<double>& F_host,
-                                 const std::vector<double>& D_host,
-                                 DeviceArray<double>& d_Fock) {
-  int N = static_cast<int>(nao_);
-  std::vector<double> S_host(N*N);
-  cudaMemcpy(S_host.data(), d_S_, N*N*sizeof(double), cudaMemcpyDeviceToHost);
-  std::vector<double> FD(N*N, 0.0), FDS(N*N, 0.0), SD(N*N, 0.0), SDF(N*N, 0.0);
-  for (int i = 0; i < N; i++) {
-    for (int j = 0; j < N; j++) {
-      double fd = 0.0, sd = 0.0;
-      for (int k = 0; k < N; k++) {
-        fd += F_host[i*N+k] * D_host[k*N+j];
-        sd += S_host[i*N+k] * D_host[k*N+j];
-      }
-      FD[i*N+j] = fd; SD[i*N+j] = sd;
-    }
-  }
-  for (int i = 0; i < N; i++)
-    for (int j = 0; j < N; j++) {
-      double fds = 0.0, sdf = 0.0;
-      for (int k = 0; k < N; k++) {
-        fds += FD[i*N+k] * S_host[k*N+j];
-        sdf += SD[i*N+k] * F_host[k*N+j];
-      }
-      FDS[i*N+j] = fds; SDF[i*N+j] = sdf;
-    }
-
-  std::vector<double> err(N*N);
-  for (int i = 0; i < N*N; i++) err[i] = FDS[i] - SDF[i];
-
-  if (static_cast<int>(errs.size()) >= params_.diis_max_space) {
-    errs.erase(errs.begin());
-    focks.erase(focks.begin());
-  }
-  errs.push_back(err);
-  focks.push_back(F_host);
-
-  int nvec = static_cast<int>(errs.size());
-  if (nvec < 2) return;
-
-  int m = nvec + 1;
-  std::vector<double> B(m*m, 0.0);
-  for (int i = 0; i < nvec; i++)
-    for (int j = 0; j <= i; j++) {
-      double dot = 0.0;
-      for (int k = 0; k < N*N; k++) dot += errs[i][k] * errs[j][k];
-      B[i*m+j] = B[j*m+i] = dot;
-    }
-  for (int i = 0; i < nvec; i++) B[i*m+nvec] = B[nvec*m+i] = -1.0;
-  B[nvec*m+nvec] = 0.0;
-  std::vector<double> rhs(m, 0.0); rhs[nvec] = -1.0;
-
-  auto Bc = B; auto rhsc = rhs;
-  bool ok = true;
-  for (int col = 0; col < m; col++) {
-    int pivot = col;
-    for (int r = col+1; r < m; r++)
-      if (std::fabs(Bc[r*m+col]) > std::fabs(Bc[pivot*m+col])) pivot = r;
-    if (std::fabs(Bc[pivot*m+col]) < 1e-20) { ok = false; break; }
-    if (pivot != col) {
-      for (int j = 0; j < m; j++) std::swap(Bc[col*m+j], Bc[pivot*m+j]);
-      std::swap(rhsc[col], rhsc[pivot]);
-    }
-    for (int r = col+1; r < m; r++) {
-      double f = Bc[r*m+col] / Bc[col*m+col];
-      for (int j = col; j < m; j++) Bc[r*m+j] -= f * Bc[col*m+j];
-      rhsc[r] -= f * rhsc[col];
-    }
-  }
-  if (!ok) return;
-
-  std::vector<double> coeffs(m, 0.0);
-  for (int i = m-1; i >= 0; i--) {
-    double s = rhsc[i];
-    for (int j = i+1; j < m; j++) s -= Bc[i*m+j] * coeffs[j];
-    coeffs[i] = s / Bc[i*m+i];
-  }
-
-  std::vector<double> F_diis(N*N, 0.0);
-  for (int i = 0; i < nvec; i++)
-    for (int j = 0; j < N*N; j++)
-      F_diis[j] += coeffs[i] * focks[i][j];
-  cudaMemcpy(d_Fock, F_diis.data(), N*N*sizeof(double), cudaMemcpyHostToDevice);
 }
 
 void SCFSolver::run() {
@@ -490,61 +405,68 @@ void SCFSolver::run() {
   build_core_hamiltonian();
   initial_guess();
 
-  std::vector<std::vector<double>> diis_errs_a, diis_focks_a;
-  std::vector<std::vector<double>> diis_errs_b, diis_focks_b;
   int N = static_cast<int>(nao_);
+  int n2 = N * N;
   double e_prev = 0.0;
+  diis_a_.clear();
+  diis_b_.clear();
 
   for (iter_ = 1; iter_ <= params_.max_iter; iter_++) {
     NvtxRange iter_range("SCF iteration");
-    std::vector<double> Da(N*N), Db(N*N), Da_old(N*N), Db_old(N*N);
-    cudaMemcpy(Da.data(), d_D_a_, N*N*sizeof(double), cudaMemcpyDeviceToHost);
-    cudaMemcpy(Db.data(), d_D_b_, N*N*sizeof(double), cudaMemcpyDeviceToHost);
-    cudaMemcpy(Da_old.data(), d_D_old_a_, N*N*sizeof(double), cudaMemcpyDeviceToHost);
-    cudaMemcpy(Db_old.data(), d_D_old_b_, N*N*sizeof(double), cudaMemcpyDeviceToHost);
 
     if (uks_) build_fock_uks();
     else      build_fock_rks();
 
-    std::vector<double> Fa(N*N), Fb(N*N);
-    cudaMemcpy(Fa.data(), d_Fock_a_, N*N*sizeof(double), cudaMemcpyDeviceToHost);
+    // Snapshot raw Fock before DIIS (for trust-region reject).
+    cublasDcopy(cublas_, n2, d_Fock_a_, 1, d_Fock_save_a_, 1);
     if (uks_)
-      cudaMemcpy(Fb.data(), d_Fock_b_, N*N*sizeof(double), cudaMemcpyDeviceToHost);
+      cublasDcopy(cublas_, n2, d_Fock_b_, 1, d_Fock_save_b_, 1);
 
-    // Energy
-    if (uks_) {
-      e_hcore_ = trace_dot(d_D_a_, d_Hcore_, N) + trace_dot(d_D_b_, d_Hcore_, N);
-      // Rebuild D_tot = Da+Db for J energy
+    // Energy on device (symmetric matrices → Frobenius = Tr(AB))
+    {
+      NvtxRange energy_range("SCF energy");
+      if (uks_) {
+      e_hcore_ = frobenius_dot(d_D_a_, d_Hcore_, n2) +
+                 frobenius_dot(d_D_b_, d_Hcore_, n2);
       double one = 1.0;
-      cublasDcopy(cublas_, N*N, d_D_a_, 1, d_D_tot_, 1);
-      cublasDaxpy(cublas_, N*N, &one, d_D_b_, 1, d_D_tot_, 1);
-      e_j_ = 0.5 * trace_dot(d_D_tot_, d_J_, N);
+      cublasDcopy(cublas_, n2, d_D_a_, 1, d_D_tot_, 1);
+      cublasDaxpy(cublas_, n2, &one, d_D_b_, 1, d_D_tot_, 1);
+      e_j_ = 0.5 * frobenius_dot(d_D_tot_, d_J_, n2);
       e_k_ = 0.0;
       if (xc_ && (xc_->is_hybrid() || xc_->is_hf())) {
-        e_k_ = -0.5 * (trace_dot(d_D_a_, d_K_a_, N) + trace_dot(d_D_b_, d_K_b_, N));
+        e_k_ = -0.5 * (frobenius_dot(d_D_a_, d_K_a_, n2) +
+                       frobenius_dot(d_D_b_, d_K_b_, n2));
       }
-      e_kin_ = trace_dot(d_D_a_, d_T_, N) + trace_dot(d_D_b_, d_T_, N);
-      e_ne_  = trace_dot(d_D_a_, d_V_, N) + trace_dot(d_D_b_, d_V_, N);
-      tr_ds_ = trace_dot(d_D_a_, d_S_, N) + trace_dot(d_D_b_, d_S_, N);
+      e_kin_ = frobenius_dot(d_D_a_, d_T_, n2) + frobenius_dot(d_D_b_, d_T_, n2);
+      e_ne_  = frobenius_dot(d_D_a_, d_V_, n2) + frobenius_dot(d_D_b_, d_V_, n2);
+      tr_ds_ = frobenius_dot(d_D_a_, d_S_, n2) + frobenius_dot(d_D_b_, d_S_, n2);
     } else {
-      double tr_dh = trace_dot(d_D_a_, d_Hcore_, N);
-      double tr_dj = trace_dot(d_D_a_, d_J_, N);
+      double tr_dh = frobenius_dot(d_D_a_, d_Hcore_, n2);
+      double tr_dj = frobenius_dot(d_D_a_, d_J_, n2);
       e_hcore_ = 2.0 * tr_dh;
       e_j_ = 2.0 * tr_dj;
       e_k_ = 0.0;
       if (xc_ && (xc_->is_hybrid() || xc_->is_hf()))
-        e_k_ = -trace_dot(d_D_a_, d_K_a_, N);
-      e_kin_ = 2.0 * trace_dot(d_D_a_, d_T_, N);
-      e_ne_  = 2.0 * trace_dot(d_D_a_, d_V_, N);
-      tr_ds_ = trace_dot(d_D_a_, d_S_, N);
+        e_k_ = -frobenius_dot(d_D_a_, d_K_a_, n2);
+      e_kin_ = 2.0 * frobenius_dot(d_D_a_, d_T_, n2);
+      e_ne_  = 2.0 * frobenius_dot(d_D_a_, d_V_, n2);
+      tr_ds_ = frobenius_dot(d_D_a_, d_S_, n2);
     }
     e_elec_ = e_hcore_ + e_j_ + e_k_ + e_xc_;
     e_total_ = e_elec_ + e_nuc_;
+    }
+
     double dE = (iter_ > 1) ? (e_total_ - e_prev) : 0.0;
 
-    double rms_a = (iter_ > 1) ? compute_rms_delta(Da, Da_old) : 1.0;
-    double rms_b = (uks_ && iter_ > 1) ? compute_rms_delta(Db, Db_old) : 0.0;
-    double rms_d = uks_ ? std::sqrt(0.5*(rms_a*rms_a + rms_b*rms_b)) : rms_a;
+    double rms_a = 1.0, rms_b = 0.0;
+    {
+      NvtxRange rms_range("SCF RMS");
+      rms_a = (iter_ > 1) ? compute_rms_delta_device(d_D_a_, d_D_old_a_, n2) : 1.0;
+      rms_b = (uks_ && iter_ > 1)
+                         ? compute_rms_delta_device(d_D_b_, d_D_old_b_, n2)
+                         : 0.0;
+    }
+    double rms_d = uks_ ? std::sqrt(0.5 * (rms_a * rms_a + rms_b * rms_b)) : rms_a;
 
     if (params_.print_level >= 1) {
       std::cout << "  Iter " << std::setw(3) << iter_
@@ -564,14 +486,14 @@ void SCFSolver::run() {
     }
 
     if (iter_ >= params_.diis_start) {
-      diis_extrapolate(diis_errs_a, diis_focks_a, Fa, Da, d_Fock_a_);
+      diis_a_.extrapolate(cublas_, d_S_, d_Fock_a_, d_D_a_);
       if (uks_)
-        diis_extrapolate(diis_errs_b, diis_focks_b, Fb, Db, d_Fock_b_);
+        diis_b_.extrapolate(cublas_, d_S_, d_Fock_b_, d_D_b_);
     }
 
-    cudaMemcpy(d_D_old_a_, Da.data(), N*N*sizeof(double), cudaMemcpyHostToDevice);
+    cublasDcopy(cublas_, n2, d_D_a_, 1, d_D_old_a_, 1);
     if (uks_)
-      cudaMemcpy(d_D_old_b_, Db.data(), N*N*sizeof(double), cudaMemcpyHostToDevice);
+      cublasDcopy(cublas_, n2, d_D_b_, 1, d_D_old_b_, 1);
 
     diagonalize_fock(d_Fock_a_, d_C_a_, mo_energies_a_);
     build_density(d_C_a_, uks_ ? nocc_a_ : nocc_, d_D_a_);
@@ -579,30 +501,27 @@ void SCFSolver::run() {
       diagonalize_fock(d_Fock_b_, d_C_b_, mo_energies_b_);
       build_density(d_C_b_, nocc_b_, d_D_b_);
     } else {
-      cublasDcopy(cublas_, N*N, d_C_a_, 1, d_C_b_, 1);
-      cublasDcopy(cublas_, N*N, d_D_a_, 1, d_D_b_, 1);
+      cublasDcopy(cublas_, n2, d_C_a_, 1, d_C_b_, 1);
+      cublasDcopy(cublas_, n2, d_D_a_, 1, d_D_b_, 1);
       mo_energies_b_ = mo_energies_a_;
     }
 
-    // DIIS trust-region: reject unphysical densities and reset the DIIS
-    // subspace so poisoned error vectors cannot keep the SCF oscillating.
+    // DIIS trust-region: reject unphysical densities and reset the subspace.
     if (iter_ >= params_.diis_start + 2) {
-      double trA = trace_dot(d_D_a_, d_S_, N);
+      double trA = frobenius_dot(d_D_a_, d_S_, n2);
       double expect = uks_ ? static_cast<double>(nocc_a_) : static_cast<double>(nocc_);
       if (std::abs(trA - expect) > 0.5 * std::max(expect, 1.0)) {
         if (params_.print_level >= 2)
           std::cout << "  DIIS rejected (Tr[Da*S]=" << trA << "), using raw Fock\n";
-        cudaMemcpy(d_Fock_a_, Fa.data(), N*N*sizeof(double), cudaMemcpyHostToDevice);
+        cublasDcopy(cublas_, n2, d_Fock_save_a_, 1, d_Fock_a_, 1);
         diagonalize_fock(d_Fock_a_, d_C_a_, mo_energies_a_);
         build_density(d_C_a_, uks_ ? nocc_a_ : nocc_, d_D_a_);
-        diis_errs_a.clear();
-        diis_focks_a.clear();
+        diis_a_.clear();
         if (uks_) {
-          cudaMemcpy(d_Fock_b_, Fb.data(), N*N*sizeof(double), cudaMemcpyHostToDevice);
+          cublasDcopy(cublas_, n2, d_Fock_save_b_, 1, d_Fock_b_, 1);
           diagonalize_fock(d_Fock_b_, d_C_b_, mo_energies_b_);
           build_density(d_C_b_, nocc_b_, d_D_b_);
-          diis_errs_b.clear();
-          diis_focks_b.clear();
+          diis_b_.clear();
         }
       }
     }
@@ -610,36 +529,29 @@ void SCFSolver::run() {
     if (params_.damping > 0.0) {
       double damp = params_.damping;
       double one_minus = 1.0 - damp;
-      cublasDscal(cublas_, N*N, &one_minus, d_D_a_, 1);
-      cublasDaxpy(cublas_, N*N, &damp, d_D_old_a_, 1, d_D_a_, 1);
+      cublasDscal(cublas_, n2, &one_minus, d_D_a_, 1);
+      cublasDaxpy(cublas_, n2, &damp, d_D_old_a_, 1, d_D_a_, 1);
       if (uks_) {
-        cublasDscal(cublas_, N*N, &one_minus, d_D_b_, 1);
-        cublasDaxpy(cublas_, N*N, &damp, d_D_old_b_, 1, d_D_b_, 1);
+        cublasDscal(cublas_, n2, &one_minus, d_D_b_, 1);
+        cublasDaxpy(cublas_, n2, &damp, d_D_old_b_, 1, d_D_b_, 1);
       }
     }
 
     e_prev = e_total_;
 
-    // Periodic DIIS flush: CH4/STO-3G and similar cases can oscillate near
-    // convergence when a poisoned DIIS subspace never triggers the Tr[DS]
-    // trust check. Flushing regularly recovers without global damping.
     if (iter_ >= 25 && (iter_ % 15) == 0 && !converged_) {
-      diis_errs_a.clear();
-      diis_focks_a.clear();
-      diis_errs_b.clear();
-      diis_focks_b.clear();
+      diis_a_.clear();
+      diis_b_.clear();
       if (params_.print_level >= 2)
         std::cout << "  DIIS subspace flushed at iter " << iter_ << "\n";
     }
   }
 
   form_total_density();
-  if (!uks_) {
-    // RKS reporting: D_tot = 2*D_alpha already done in form_total_density
-  } else {
+  if (uks_) {
     double one = 1.0;
-    cublasDcopy(cublas_, N*N, d_D_a_, 1, d_D_tot_, 1);
-    cublasDaxpy(cublas_, N*N, &one, d_D_b_, 1, d_D_tot_, 1);
+    cublasDcopy(cublas_, n2, d_D_a_, 1, d_D_tot_, 1);
+    cublasDaxpy(cublas_, n2, &one, d_D_b_, 1, d_D_tot_, 1);
   }
 
   if (params_.verbose) {

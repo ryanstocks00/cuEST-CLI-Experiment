@@ -153,23 +153,29 @@ class DeviceArray {
 
   DeviceArray(const DeviceArray&) = delete;
   DeviceArray& operator=(const DeviceArray&) = delete;
-  DeviceArray(DeviceArray&& other) noexcept : ptr_(other.ptr_) {
+  DeviceArray(DeviceArray&& other) noexcept
+      : ptr_(other.ptr_), capacity_(other.capacity_) {
     other.ptr_ = nullptr;
+    other.capacity_ = 0;
   }
   DeviceArray& operator=(DeviceArray&& other) noexcept {
     if (this != &other) {
       if (ptr_) cudaFree(ptr_);
       ptr_ = other.ptr_;
+      capacity_ = other.capacity_;
       other.ptr_ = nullptr;
+      other.capacity_ = 0;
     }
     return *this;
   }
 
+  /// Free and allocate exactly `bytes` (0 frees).
   void alloc(size_t bytes) {
     if (ptr_) {
       cudaFree(ptr_);
       ptr_ = nullptr;
     }
+    capacity_ = 0;
     if (bytes == 0) return;
     T* fresh = nullptr;
     if (cudaMalloc(&fresh, bytes) != cudaSuccess) {
@@ -177,7 +183,16 @@ class DeviceArray {
                                std::to_string(bytes) + " bytes)");
     }
     ptr_ = fresh;
+    capacity_ = bytes;
   }
+
+  /// Grow-only: no-op if capacity already covers `bytes`.
+  void ensure(size_t bytes) {
+    if (bytes <= capacity_) return;
+    alloc(bytes);
+  }
+
+  [[nodiscard]] size_t capacity() const { return capacity_; }
 
   T* get() { return ptr_; }
   const T* get() const { return ptr_; }
@@ -207,6 +222,7 @@ class DeviceArray {
 
  private:
   T* ptr_{nullptr};
+  size_t capacity_{0};
 };
 
 // ---------------------------------------------------------------------------
@@ -216,16 +232,7 @@ class Workspace {
  public:
   Workspace() = default;
 
-  explicit Workspace(const cuestWorkspaceDescriptor_t& desc) {
-    if (desc.hostBufferSizeInBytes)
-      host_buf_.resize(desc.hostBufferSizeInBytes);
-    if (desc.deviceBufferSizeInBytes)
-      dev_buf_.alloc(desc.deviceBufferSizeInBytes);
-    ws_.hostBuffer = reinterpret_cast<uintptr_t>(host_buf_.data());
-    ws_.hostBufferSizeInBytes = desc.hostBufferSizeInBytes;
-    ws_.deviceBuffer = reinterpret_cast<uintptr_t>(dev_buf_.get());
-    ws_.deviceBufferSizeInBytes = desc.deviceBufferSizeInBytes;
-  }
+  explicit Workspace(const cuestWorkspaceDescriptor_t& desc) { ensure(desc); }
 
   Workspace(const Workspace&) = delete;
   Workspace& operator=(const Workspace&) = delete;
@@ -245,6 +252,22 @@ class Workspace {
       other.ws_ = {};
     }
     return *this;
+  }
+
+  /// Grow host/device scratch to cover `desc`; reuse capacity across calls.
+  void ensure(const cuestWorkspaceDescriptor_t& desc) {
+    if (desc.hostBufferSizeInBytes > host_buf_.size())
+      host_buf_.resize(desc.hostBufferSizeInBytes);
+    if (desc.deviceBufferSizeInBytes > 0)
+      dev_buf_.ensure(desc.deviceBufferSizeInBytes);
+
+    ws_.hostBuffer = host_buf_.empty()
+                         ? 0
+                         : reinterpret_cast<uintptr_t>(host_buf_.data());
+    // Report available capacity so cuEST can reuse a larger pooled buffer.
+    ws_.hostBufferSizeInBytes = host_buf_.size();
+    ws_.deviceBuffer = reinterpret_cast<uintptr_t>(dev_buf_.get());
+    ws_.deviceBufferSizeInBytes = dev_buf_.capacity();
   }
 
   cuestWorkspace_t* ptr() { return &ws_; }

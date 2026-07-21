@@ -1,6 +1,9 @@
 /**
  * @file integrals.cpp
  * @brief Implementations of cuEST integral computation wrappers.
+ *
+ * Compute scratch is shared via CuESTContext::scratch() so peak temp memory
+ * is max(query) across OE / DF / XC / ECP, not the sum.
  */
 
 #include "cuest_wrapper/integrals.hpp"
@@ -41,13 +44,13 @@ OneElectronIntegrals::OneElectronIntegrals(CuESTContext& ctx,
       &persistent_desc_, &temp_desc, plan_.ptr()));
 
   persistent_ws_ = Workspace(persistent_desc_);
-  Workspace temp_ws(temp_desc);
+  ctx_.scratch().ensure(temp_desc);
 
   CUEST_NVTX("cuestOEIntPlanCreate",
              cuestOEIntPlanCreate(
                  ctx_, basis, pair_list,
                  oe_params,
-                 persistent_ws_.ptr(), temp_ws.ptr(), plan_.ptr()));
+                 persistent_ws_.ptr(), ctx_.scratch().ptr(), plan_.ptr()));
 }
 
 void OneElectronIntegrals::compute_overlap(double* d_S) {
@@ -55,12 +58,12 @@ void OneElectronIntegrals::compute_overlap(double* d_S) {
   CUEST_CHECK(cuestOverlapComputeWorkspaceQuery(
       ctx_, plan_, cuest::OverlapComputeParams{},
       &temp_desc, d_S));
-  Workspace temp_ws(temp_desc);
+  ctx_.scratch().ensure(temp_desc);
 
   CUEST_NVTX("cuestOverlapCompute",
              cuestOverlapCompute(
                  ctx_, plan_, cuest::OverlapComputeParams{},
-                 temp_ws.ptr(), d_S));
+                 ctx_.scratch().ptr(), d_S));
 }
 
 void OneElectronIntegrals::compute_kinetic(double* d_T) {
@@ -68,12 +71,12 @@ void OneElectronIntegrals::compute_kinetic(double* d_T) {
   CUEST_CHECK(cuestKineticComputeWorkspaceQuery(
       ctx_, plan_, cuest::KineticComputeParams{},
       &temp_desc, d_T));
-  Workspace temp_ws(temp_desc);
+  ctx_.scratch().ensure(temp_desc);
 
   CUEST_NVTX("cuestKineticCompute",
              cuestKineticCompute(
                  ctx_, plan_, cuest::KineticComputeParams{},
-                 temp_ws.ptr(), d_T));
+                 ctx_.scratch().ptr(), d_T));
 }
 
 void OneElectronIntegrals::compute_potential(double* d_V, uint64_t natom,
@@ -89,12 +92,12 @@ void OneElectronIntegrals::compute_potential(double* d_V, uint64_t natom,
   CUEST_CHECK(cuestPotentialComputeWorkspaceQuery(
       ctx_, plan_, params,
       &temp_desc, natom, d_xyz, d_charges, d_V));
-  Workspace temp_ws(temp_desc);
+  ctx_.scratch().ensure(temp_desc);
 
   CUEST_NVTX("cuestPotentialCompute",
              cuestPotentialCompute(
                  ctx_, plan_, params,
-                 temp_ws.ptr(), natom, d_xyz, d_charges, d_V));
+                 ctx_.scratch().ptr(), natom, d_xyz, d_charges, d_V));
 }
 
 // ---------------------------------------------------------------------------
@@ -113,11 +116,11 @@ DFJKBuilder::DFJKBuilder(CuESTContext& ctx, cuestAOBasis_t primary_basis,
         static_cast<cuestHandle_t>(ctx_), primary_basis, natom, xyz_host,
         1e-14, pl_params, &pers_desc, &temp_desc, pair_list_.ptr()));
     pair_list_persist_ = Workspace(pers_desc);
-    Workspace temp_ws(temp_desc);
+    ctx_.scratch().ensure(temp_desc);
     CUEST_NVTX("cuestAOPairListCreate",
                cuestAOPairListCreate(
                    static_cast<cuestHandle_t>(ctx_), primary_basis, natom, xyz_host,
-                   1e-14, pl_params, pair_list_persist_.ptr(), temp_ws.ptr(),
+                   1e-14, pl_params, pair_list_persist_.ptr(), ctx_.scratch().ptr(),
                    pair_list_.ptr()));
   }
 
@@ -135,12 +138,12 @@ DFJKBuilder::DFJKBuilder(CuESTContext& ctx, cuestAOBasis_t primary_basis,
         static_cast<cuestHandle_t>(ctx_), primary_basis, aux_basis,
         pair_list_.get(), df_params, &pers_desc, &temp_desc, plan_.ptr()));
     plan_persist_ = Workspace(pers_desc);
-    Workspace temp_ws(temp_desc);
+    ctx_.scratch().ensure(temp_desc);
     CUEST_NVTX("cuestDFIntPlanCreate",
                cuestDFIntPlanCreate(
                    static_cast<cuestHandle_t>(ctx_), primary_basis, aux_basis,
-                   pair_list_.get(), df_params, plan_persist_.ptr(), temp_ws.ptr(),
-                   plan_.ptr()));
+                   pair_list_.get(), df_params, plan_persist_.ptr(),
+                   ctx_.scratch().ptr(), plan_.ptr()));
   }
 }
 
@@ -162,11 +165,11 @@ void DFJKBuilder::compute_J(const double* d_D, double* d_J) {
   CUEST_CHECK(cuestDFCoulombComputeWorkspaceQuery(
       ctx_, plan_, params,
       &temp_desc, d_D, d_J));
-  Workspace temp_ws(temp_desc);
+  ctx_.scratch().ensure(temp_desc);
   CUEST_NVTX("cuestDFCoulombCompute",
              cuestDFCoulombCompute(
                  ctx_, plan_, params,
-                 temp_ws.ptr(), d_D, d_J));
+                 ctx_.scratch().ptr(), d_D, d_J));
 }
 
 void DFJKBuilder::compute_K(uint64_t nocc, const double* d_Cocc, double* d_K,
@@ -179,11 +182,11 @@ void DFJKBuilder::compute_K(uint64_t nocc, const double* d_Cocc, double* d_K,
   CUEST_CHECK(cuestDFSymmetricExchangeComputeWorkspaceQuery(
       ctx_, plan_, cuest::DFSymmetricExchangeComputeParams{},
       &var_buf, &temp_desc, nocc, d_Cocc, d_K));
-  Workspace temp_ws(temp_desc);
+  ctx_.scratch().ensure(temp_desc);
   CUEST_NVTX("cuestDFSymmetricExchangeCompute",
              cuestDFSymmetricExchangeCompute(
                  ctx_, plan_, cuest::DFSymmetricExchangeComputeParams{},
-                 &var_buf, temp_ws.ptr(), nocc, d_Cocc, d_K));
+                 &var_buf, ctx_.scratch().ptr(), nocc, d_Cocc, d_K));
 }
 
 // ---------------------------------------------------------------------------
@@ -223,14 +226,14 @@ XCBuilder::XCBuilder(CuESTContext& ctx, cuestAOBasis_t basis,
       &pers_desc, &temp_desc, plan_.ptr()));
 
   xc_persist_ws_ = Workspace(pers_desc);
-  Workspace temp_ws(temp_desc);
+  ctx_.scratch().ensure(temp_desc);
 
   CUEST_NVTX("cuestXCIntPlanCreate",
              cuestXCIntPlanCreate(
                  ctx_, basis, mol_grid_,
                  to_cuest_functional(functional_id),
                  xc_params,
-                 xc_persist_ws_.ptr(), temp_ws.ptr(), plan_.ptr()));
+                 xc_persist_ws_.ptr(), ctx_.scratch().ptr(), plan_.ptr()));
 }
 
 void XCBuilder::compute_vxc_rks(uint64_t nocc, const double* d_Cocc,
@@ -248,12 +251,12 @@ void XCBuilder::compute_vxc_rks(uint64_t nocc, const double* d_Cocc,
       &var_buf, &temp_desc,
       nocc, d_Cocc, exc, d_Vxc));
 
-  Workspace temp_ws(temp_desc);
+  ctx_.scratch().ensure(temp_desc);
   CUEST_NVTX("cuestXCPotentialRKSCompute",
              cuestXCPotentialRKSCompute(
                  ctx_, plan_,
                  xc_comp_params,
-                 &var_buf, temp_ws.ptr(),
+                 &var_buf, ctx_.scratch().ptr(),
                  nocc, d_Cocc, exc, d_Vxc));
 }
 
@@ -276,12 +279,12 @@ void XCBuilder::compute_vxc_uks(uint64_t nocc_a, uint64_t nocc_b,
       d_Cocc_a, d_Cocc_b,
       exc, d_Vxc_a, d_Vxc_b));
 
-  Workspace temp_ws(temp_desc);
+  ctx_.scratch().ensure(temp_desc);
   CUEST_NVTX("cuestXCPotentialUKSCompute",
              cuestXCPotentialUKSCompute(
                  ctx_, plan_,
                  cuest::XCPotentialUKSComputeParams{},
-                 &var_buf, temp_ws.ptr(),
+                 &var_buf, ctx_.scratch().ptr(),
                  nocc_a, nocc_b,
                  d_Cocc_a, d_Cocc_b,
                  exc, d_Vxc_a, d_Vxc_b));
@@ -317,14 +320,14 @@ ECPIntegrals::ECPIntegrals(CuESTContext& ctx, cuestAOBasis_t basis,
       &persistent_desc_, &temp_desc, plan_.ptr()));
 
   persistent_ws_ = Workspace(persistent_desc_);
-  Workspace temp_ws(temp_desc);
+  ctx_.scratch().ensure(temp_desc);
 
   CUEST_NVTX("cuestECPIntPlanCreate",
              cuestECPIntPlanCreate(
                  ctx_, basis, xyz_host,
                  num_ecp_atoms, ecp_indices, ecp_atoms,
                  cuest::ECPIntPlanParams{},
-                 persistent_ws_.ptr(), temp_ws.ptr(), plan_.ptr()));
+                 persistent_ws_.ptr(), ctx_.scratch().ptr(), plan_.ptr()));
 }
 
 void ECPIntegrals::compute(double* d_ECP, size_t variable_buf_bytes) {
@@ -338,12 +341,12 @@ void ECPIntegrals::compute(double* d_ECP, size_t variable_buf_bytes) {
       cuest::ECPComputeParams{},
       &var_buf, &temp_desc, d_ECP));
 
-  Workspace temp_ws(temp_desc);
+  ctx_.scratch().ensure(temp_desc);
   CUEST_NVTX("cuestECPCompute",
              cuestECPCompute(
                  ctx_, plan_,
                  cuest::ECPComputeParams{},
-                 &var_buf, temp_ws.ptr(), d_ECP));
+                 &var_buf, ctx_.scratch().ptr(), d_ECP));
 }
 
 }  // namespace cuest

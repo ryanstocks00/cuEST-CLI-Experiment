@@ -33,13 +33,15 @@ class CuESTContext {
 
   CuESTContext(const CuESTContext&) = delete;
   CuESTContext& operator=(const CuESTContext&) = delete;
-  CuESTContext(CuESTContext&& other) noexcept : handle_(other.handle_) {
+  CuESTContext(CuESTContext&& other) noexcept
+      : handle_(other.handle_), scratch_(std::move(other.scratch_)) {
     other.handle_ = nullptr;
   }
   CuESTContext& operator=(CuESTContext&& other) noexcept {
     if (this != &other) {
       if (handle_) cuestDestroy(handle_);
       handle_ = other.handle_;
+      scratch_ = std::move(other.scratch_);
       other.handle_ = nullptr;
     }
     return *this;
@@ -73,8 +75,13 @@ class CuESTContext {
     return nao;
   }
 
+  /// Grow-only scratch shared by all integral / gradient computes.
+  /// Peak device usage is max(query), not sum — callers must not overlap.
+  Workspace& scratch() { return scratch_; }
+
  private:
   cuestHandle_t handle_{nullptr};
+  Workspace scratch_;
 };
 
 }  // namespace cuest

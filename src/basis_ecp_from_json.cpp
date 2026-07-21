@@ -113,12 +113,13 @@ OwnedECPIntPlan ECPBuilder::create_ecp_int_plan(cuestAOBasis_t basis,
       ecp_params, &pers_desc, &temp_desc, owned.plan.ptr()));
 
   owned.persist = Workspace(pers_desc);
-  Workspace temp_ws(temp_desc);
+  ctx_.scratch().ensure(temp_desc);
   CUEST_NVTX("cuestECPIntPlanCreate",
              cuestECPIntPlanCreate(
                  static_cast<cuestHandle_t>(ctx_), basis, xyz_host,
                  num_active_ecp_, ecp_indices_.data(), ecp_atoms_raw_.data(),
-                 ecp_params, owned.persist.ptr(), temp_ws.ptr(), owned.plan.ptr()));
+                 ecp_params, owned.persist.ptr(), ctx_.scratch().ptr(),
+                 owned.plan.ptr()));
   return owned;
 }
 

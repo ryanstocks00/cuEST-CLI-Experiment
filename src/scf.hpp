@@ -14,6 +14,7 @@
 #include "cuest_wrapper/context.hpp"
 #include "cuest_wrapper/integrals.hpp"
 #include "cuest_wrapper/raii.hpp"
+#include "diis.hpp"
 
 namespace cuest {
 
@@ -100,14 +101,9 @@ class SCFSolver {
   void form_total_density();
   void initial_guess();
   void break_beta_symmetry();
-  double compute_rms_delta(const std::vector<double>& D_new,
-                           const std::vector<double>& D_old);
-  double trace_dot(const double* d_A, const double* d_B, int N);
-  void diis_extrapolate(std::vector<std::vector<double>>& errs,
-                        std::vector<std::vector<double>>& focks,
-                        const std::vector<double>& F_host,
-                        const std::vector<double>& D_host,
-                        DeviceArray<double>& d_Fock);
+  /// Frobenius Tr(A^T B) ≡ ∑ A_ij B_ij (valid for symmetric energy matrices).
+  double frobenius_dot(const double* d_A, const double* d_B, int n2);
+  double compute_rms_delta_device(const double* d_D, const double* d_D_old, int n2);
 
   CuESTContext& ctx_;
   BasisBuilder& basis_;
@@ -133,11 +129,19 @@ class SCFSolver {
 
   DeviceArray<double> d_Hcore_, d_S_, d_T_, d_V_, d_ECP_;
   DeviceArray<double> d_Fock_a_, d_Fock_b_;
+  DeviceArray<double> d_Fock_save_a_, d_Fock_save_b_;
   DeviceArray<double> d_D_a_, d_D_b_, d_D_tot_, d_D_old_a_, d_D_old_b_;
   DeviceArray<double> d_C_a_, d_C_b_;
+  DeviceArray<double> d_Cocc_a_, d_Cocc_b_;
   DeviceArray<double> d_J_, d_K_a_, d_K_b_, d_Vxc_a_, d_Vxc_b_;
   DeviceArray<double> d_eigvals_, d_xyz_, d_charges_;
   DeviceArray<double> d_Fwork_, d_Swork_;
+  DeviceArray<double> d_syev_work_;
+  DeviceArray<int> d_info_;
+  int syev_lwork_{0};
+
+  DeviceArray<double> d_rms_scratch_;
+  DIIS diis_a_, diis_b_;
 };
 
 }  // namespace cuest
