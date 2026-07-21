@@ -280,7 +280,7 @@ int main(int argc, char* argv[]) {
     uint64_t naux = ctx.query_nao(aux_basis->handle());
     if (!quiet) std::cout << "  Auxiliary basis functions: " << naux << "\n";
 
-    // --- Build ECP from JSON (auto-detected) and apply Z_eff ---
+    // --- Build ECP from JSON (basis-specific; not stored on Molecule) ---
     ECPBuilder* ecp_builder_ptr = nullptr;
     ECPIntegrals* ecp_int_ptr = nullptr;
     std::unique_ptr<ECPBuilder> ecp_builder;
@@ -289,33 +289,35 @@ int main(int argc, char* argv[]) {
     ecp_builder = std::make_unique<ECPBuilder>(ctx, mol);
     ecp_builder->build_from_json(basis_path);
     ecp_builder_ptr = ecp_builder.get();
+    const int n_ecp = static_cast<int>(ecp_builder->total_ecp_electrons());
     if (ecp_builder->has_ecp()) {
-      ecp_builder->apply_to_molecule(mol);
       if (!quiet) {
-        std::cout << "  ECP active: " << ecp_builder->total_ecp_electrons()
+        std::cout << "  ECP active: " << n_ecp
                   << " core electrons replaced (using Z_eff)\n";
       }
     } else if (!quiet) {
       std::cout << "  No ECP atoms found in molecule.\n";
     }
 
-    if (mol.nelec() < 0) {
+    if (mol.nelec(n_ecp) < 0) {
       std::cerr << "Error: negative electron count after charge/ECP (got "
-                << mol.nelec() << ").\n";
+                << mol.nelec(n_ecp) << ").\n";
       return 1;
     }
-    if (mol.nalpha() < mol.nbeta() || mol.nalpha() + mol.nbeta() != mol.nelec()) {
+    if (mol.nalpha(n_ecp) < mol.nbeta(n_ecp) ||
+        mol.nalpha(n_ecp) + mol.nbeta(n_ecp) != mol.nelec(n_ecp)) {
       std::cerr << "Error: multiplicity " << multiplicity
-                << " inconsistent with electron count " << mol.nelec() << ".\n";
+                << " inconsistent with electron count " << mol.nelec(n_ecp)
+                << ".\n";
       return 1;
     }
     if (!quiet) {
-      std::cout << "  Electrons (valence): " << mol.nelec() << "\n";
+      std::cout << "  Electrons (valence): " << mol.nelec(n_ecp) << "\n";
       if (multiplicity == 1)
-        std::cout << "  Occupied orbitals: " << mol.nocc() << "\n\n";
+        std::cout << "  Occupied orbitals: " << mol.nocc(n_ecp) << "\n\n";
       else
-        std::cout << "  Occupied orbitals: α=" << mol.nalpha()
-                  << " β=" << mol.nbeta() << "\n\n";
+        std::cout << "  Occupied orbitals: α=" << mol.nalpha(n_ecp)
+                  << " β=" << mol.nbeta(n_ecp) << "\n\n";
     }
 
     // --- Build DFT grid ---
@@ -414,12 +416,14 @@ int main(int argc, char* argv[]) {
               scf.nocc_alpha(), scf.nocc_beta(),
               scf.orbital_energies(), scf.orbital_energies_beta(),
               scf.mo_coefficients_host(), scf.mo_coefficients_beta_host(),
-              scf.density_alpha_host(), scf.density_beta_host());
+              scf.density_alpha_host(), scf.density_beta_host(),
+              &ecp_builder->ecp_electrons_per_atom());
         } else {
           gc_ptr = std::make_unique<GradientComputer>(
               ctx, basis_builder, *dfjk_ptr, &xc, ecp_int_ptr, mol,
               scf.nocc(), scf.orbital_energies(),
-              scf.mo_coefficients_host(), scf.density_host());
+              scf.mo_coefficients_host(), scf.density_host(),
+              &ecp_builder->ecp_electrons_per_atom());
         }
         GradientComputer& gc = *gc_ptr;
         auto analytical = gc.compute();
@@ -451,7 +455,8 @@ int main(int argc, char* argv[]) {
         std::cout << std::setprecision(8) << std::fixed;
         for (size_t a = 0; a < mol.natom(); a++) {
           double fx=analytical[3*a], fy=analytical[3*a+1], fz=analytical[3*a+2];
-          std::cout << "  Atom " << a << " " << mol.atom(a).symbol
+          std::cout << "  Atom " << a << " "
+                    << Molecule::z_to_symbol(mol.atom(a).atomic_number)
                     << std::setw(13) << fx << std::setw(13) << fy << std::setw(13) << fz
                     << "  |F| = " << std::sqrt(fx*fx+fy*fy+fz*fz) << "\n";
         }
@@ -466,7 +471,8 @@ int main(int argc, char* argv[]) {
           for (size_t a = 0; a < mol.natom(); a++) {
             double fx = forces[3*a], fy = forces[3*a+1], fz = forces[3*a+2];
             double fnorm = std::sqrt(fx*fx + fy*fy + fz*fz);
-            std::cout << "  Atom " << a << " " << mol.atom(a).symbol
+            std::cout << "  Atom " << a << " "
+                      << Molecule::z_to_symbol(mol.atom(a).atomic_number)
                       << std::setw(13) << fx << std::setw(13) << fy
                       << std::setw(13) << fz << "  |F| = " << fnorm << "\n";
           }

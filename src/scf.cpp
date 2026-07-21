@@ -25,12 +25,17 @@ SCFSolver::SCFSolver(CuESTContext& ctx, BasisBuilder& basis,
     throw std::runtime_error("cusolverDnCreate failed");
 
   nao_ = ctx_.query_nao(basis_.basis_handle());
-  nelec_ = mol_.nelec();
+  const int n_ecp = ecp_builder_
+                        ? static_cast<int>(ecp_builder_->total_ecp_electrons())
+                        : 0;
+  const std::vector<int>* ecp_cores =
+      ecp_builder_ ? &ecp_builder_->ecp_electrons_per_atom() : nullptr;
+  nelec_ = mol_.nelec(n_ecp);
   if (nelec_ < 0)
     throw std::runtime_error("Negative electron count after charge/ECP");
 
-  nocc_a_ = static_cast<uint64_t>(mol_.nalpha());
-  nocc_b_ = static_cast<uint64_t>(mol_.nbeta());
+  nocc_a_ = static_cast<uint64_t>(mol_.nalpha(n_ecp));
+  nocc_b_ = static_cast<uint64_t>(mol_.nbeta(n_ecp));
   if (static_cast<int>(nocc_a_ + nocc_b_) != nelec_)
     throw std::runtime_error("nalpha+nbeta != nelec — check multiplicity/charge");
   if (nocc_a_ < nocc_b_)
@@ -41,7 +46,8 @@ SCFSolver::SCFSolver(CuESTContext& ctx, BasisBuilder& basis,
   if (!uks_ && (nelec_ % 2 != 0))
     throw std::runtime_error("Odd electron count requires multiplicity > 1 (UKS)");
 
-  e_nuc_ = mol_.nuclear_repulsion();
+  e_nuc_ = ecp_cores ? mol_.nuclear_repulsion(*ecp_cores)
+                     : mol_.nuclear_repulsion();
 
   size_t N2 = nao_ * nao_;
   d_Hcore_.alloc(N2 * sizeof(double));
@@ -68,7 +74,7 @@ SCFSolver::SCFSolver(CuESTContext& ctx, BasisBuilder& basis,
   d_Swork_.alloc(N2 * sizeof(double));
 
   auto xyz_h = mol_.xyz_host();
-  auto chg_h = mol_.charges_host();
+  auto chg_h = ecp_cores ? mol_.charges_host(*ecp_cores) : mol_.charges_host();
   d_xyz_.alloc(xyz_h.size() * sizeof(double));
   d_charges_.alloc(chg_h.size() * sizeof(double));
   CUDA_CHECK(cudaMemcpy(d_xyz_, xyz_h.data(), xyz_h.size()*sizeof(double), cudaMemcpyHostToDevice));
@@ -301,7 +307,7 @@ void SCFSolver::break_beta_symmetry() {
 }
 
 void SCFSolver::initial_guess() {
-  bool use_hcore = (mol_.total_ecp_electrons() > 0);
+  bool use_hcore = (ecp_builder_ && ecp_builder_->has_ecp());
   int N = static_cast<int>(nao_);
 
   if (use_hcore) {

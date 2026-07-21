@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <span>
 #include <stdexcept>
 #include <vector>
 #include "basis.hpp"
@@ -16,20 +17,23 @@
 
 namespace cuest {
 
-// Nuclear repulsion gradient: dEnuc/dR (uses Z_eff for ECP atoms)
-[[nodiscard]] inline std::vector<double> nuc_grad(const Molecule& mol) {
+// Nuclear repulsion gradient: dEnuc/dR (Z_eff from optional per-atom ECP cores)
+[[nodiscard]] inline std::vector<double> nuc_grad(
+    const Molecule& mol, std::span<const int> ecp_cores = {}) {
   size_t n = mol.natom();
   std::vector<double> g(3 * n, 0.0);
   for (size_t i = 0; i < n; i++) {
-    double zi = static_cast<double>(mol.zeff(i));
+    const int ncore_i = ecp_cores.empty() ? 0 : ecp_cores[i];
+    double zi = static_cast<double>(mol.zeff(i, ncore_i));
     for (size_t j = i + 1; j < n; j++) {
+      const int ncore_j = ecp_cores.empty() ? 0 : ecp_cores[j];
       double dx = mol.atom(i).x - mol.atom(j).x;
       double dy = mol.atom(i).y - mol.atom(j).y;
       double dz = mol.atom(i).z - mol.atom(j).z;
       double r2 = dx*dx + dy*dy + dz*dz;
       if (r2 < 1e-20) continue;
       double r = std::sqrt(r2);
-      double f = zi * static_cast<double>(mol.zeff(j)) / (r * r2);
+      double f = zi * static_cast<double>(mol.zeff(j, ncore_j)) / (r * r2);
       g[3*i+0] += f * dx;  g[3*i+1] += f * dy;  g[3*i+2] += f * dz;
       g[3*j+0] -= f * dx;  g[3*j+1] -= f * dy;  g[3*j+2] -= f * dz;
     }
@@ -65,7 +69,8 @@ class GradientComputer {
                    XCBuilder* xc_builder, ECPIntegrals* ecp_int, const Molecule& mol,
                    uint64_t nocc,
                    const std::vector<double>& eps, const std::vector<double>& C,
-                   const std::vector<double>& D_alpha);
+                   const std::vector<double>& D_alpha,
+                   const std::vector<int>* ecp_core = nullptr);
 
   /// UKS: α/β channels. One-electron terms use D_tot / W_tot (no ×2).
   GradientComputer(CuESTContext& ctx, BasisBuilder& basis, DFJKBuilder& dfjk,
@@ -73,7 +78,8 @@ class GradientComputer {
                    uint64_t nocc_a, uint64_t nocc_b,
                    const std::vector<double>& eps_a, const std::vector<double>& eps_b,
                    const std::vector<double>& C_a, const std::vector<double>& C_b,
-                   const std::vector<double>& D_a, const std::vector<double>& D_b);
+                   const std::vector<double>& D_a, const std::vector<double>& D_b,
+                   const std::vector<int>* ecp_core = nullptr);
 
   std::vector<double> compute();
   bool is_uks() const { return uks_; }
@@ -89,6 +95,7 @@ class GradientComputer {
  private:
   CuESTContext& ctx_; BasisBuilder& basis_; DFJKBuilder& dfjk_;
   XCBuilder* xc_builder_; ECPIntegrals* ecp_int_; const Molecule& mol_;
+  const std::vector<int>* ecp_core_{nullptr};
   bool uks_{false};
   uint64_t nao_, nocc_, nocc_a_, nocc_b_, natom_;
   // RKS: d_Da_ = D_alpha, d_Wa_ = W_alpha, d_Co_ = Cocc_alpha
@@ -103,8 +110,10 @@ inline GradientComputer::GradientComputer(
     XCBuilder* xc_builder, ECPIntegrals* ecp_int, const Molecule& mol,
     uint64_t nocc,
     const std::vector<double>& eps, const std::vector<double>& C,
-    const std::vector<double>& D_alpha)
+    const std::vector<double>& D_alpha,
+    const std::vector<int>* ecp_core)
   : ctx_(ctx), basis_(basis), dfjk_(dfjk), xc_builder_(xc_builder), ecp_int_(ecp_int), mol_(mol),
+    ecp_core_(ecp_core),
     uks_(false), nao_(basis.nao()), nocc_(nocc), nocc_a_(nocc), nocc_b_(nocc), natom_(mol.natom()) {
   d_Da_.alloc(nao_ * nao_ * sizeof(double));
   CUDA_CHECK(cudaMemcpy(d_Da_, D_alpha.data(), nao_ * nao_ * sizeof(double), cudaMemcpyHostToDevice));
@@ -122,8 +131,10 @@ inline GradientComputer::GradientComputer(
     uint64_t nocc_a, uint64_t nocc_b,
     const std::vector<double>& eps_a, const std::vector<double>& eps_b,
     const std::vector<double>& C_a, const std::vector<double>& C_b,
-    const std::vector<double>& D_a, const std::vector<double>& D_b)
+    const std::vector<double>& D_a, const std::vector<double>& D_b,
+    const std::vector<int>* ecp_core)
   : ctx_(ctx), basis_(basis), dfjk_(dfjk), xc_builder_(xc_builder), ecp_int_(ecp_int), mol_(mol),
+    ecp_core_(ecp_core),
     uks_(true), nao_(basis.nao()), nocc_(nocc_a), nocc_a_(nocc_a), nocc_b_(nocc_b),
     natom_(mol.natom()) {
   // One-electron / overlap: total density and total energy-weighted density.
@@ -195,11 +206,12 @@ void run_derivative(cuestWorkspaceDescriptor_t& var_buf,
 
 inline std::vector<double> GradientComputer::compute() {
   uint64_t n3 = 3 * natom_;
-  nu_ = nuc_grad(mol_);
+  nu_ = ecp_core_ ? nuc_grad(mol_, *ecp_core_) : nuc_grad(mol_);
 
   const OwnedAOPairList& pl = basis_.pair_list();
   OneElectronIntegrals oe(ctx_, basis_.basis(), pl.get());
-  auto xh = mol_.xyz_host(), ch = mol_.charges_host();
+  auto xh = mol_.xyz_host();
+  auto ch = ecp_core_ ? mol_.charges_host(*ecp_core_) : mol_.charges_host();
   DeviceArray<double> dx(3 * natom_ * sizeof(double)), dq(natom_ * sizeof(double));
   CUDA_CHECK(cudaMemcpy(dx, xh.data(), 3 * natom_ * sizeof(double), cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(dq, ch.data(), natom_ * sizeof(double), cudaMemcpyHostToDevice));

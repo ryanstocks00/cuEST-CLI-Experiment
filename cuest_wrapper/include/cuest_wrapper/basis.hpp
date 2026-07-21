@@ -139,14 +139,12 @@ class ECPBuilder {
 
   void build_from_json(const std::string& json_path);
 
-  // Apply per-atom ECP core counts onto a Molecule (sets Z_eff).
-  void apply_to_molecule(Molecule& mol) const;
-
   [[nodiscard]] bool has_ecp() const { return has_ecp_; }
   [[nodiscard]] uint64_t num_active_atoms() const { return num_active_ecp_; }
   [[nodiscard]] uint64_t total_ecp_electrons() const { return total_ecp_electrons_; }
   [[nodiscard]] const std::vector<uint64_t>& ecp_indices() const { return ecp_indices_; }
   [[nodiscard]] const std::vector<cuestECPAtom_t>& ecp_atoms() const { return ecp_atoms_raw_; }
+  /// Per-atom core electrons (size == natom; 0 where no ECP). Basis-specific.
   [[nodiscard]] const std::vector<int>& ecp_electrons_per_atom() const {
     return ecp_electrons_per_atom_;
   }

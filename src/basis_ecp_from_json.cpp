@@ -102,13 +102,6 @@ void ECPBuilder::build_from_json(const std::string& json_path) {
     ecp_atoms_raw_.push_back(a.get());
 }
 
-void ECPBuilder::apply_to_molecule(Molecule& mol) const {
-  if (ecp_electrons_per_atom_.size() != mol.natom())
-    throw std::runtime_error("ECP atom count mismatch when applying to molecule");
-  for (size_t a = 0; a < mol.natom(); a++)
-    mol.set_atom_ecp_electrons(a, ecp_electrons_per_atom_[a]);
-}
-
 OwnedECPIntPlan ECPBuilder::create_ecp_int_plan(cuestAOBasis_t basis,
                                                  const double* xyz_host) const {
   OwnedECPIntPlan owned;

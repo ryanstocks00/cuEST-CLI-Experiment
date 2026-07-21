@@ -78,7 +78,8 @@ inline std::vector<double> numerical_gradient(
             if (xyz == 1) y += sgn * delta;
             if (xyz == 2) z += sgn * delta;
           }
-          fprintf(f, "%s %14.8f %14.8f %14.8f\n", mol.atom(i).symbol.c_str(), x, y, z);
+          fprintf(f, "%s %14.8f %14.8f %14.8f\n",
+                  Molecule::z_to_symbol(mol.atom(i).atomic_number), x, y, z);
         }
         fclose(f);
 
