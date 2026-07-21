@@ -88,6 +88,15 @@ class BasisBuilder {
   [[nodiscard]] cuestAOBasis_t basis() const { return basis_.get(); }
   [[nodiscard]] const AOBasisHandle& basis_handle() const { return basis_; }
 
+  /// Prefix-sum AO offsets per atom, size natom()+1: atom a owns AOs
+  /// [ao_offsets()[a], ao_offsets()[a+1]). Derived from the actual shells
+  /// built for this basis (angular momentum + spherical/Cartesian), not a
+  /// guess — safe to use for placing atom-block guess densities.
+  [[nodiscard]] const std::vector<uint64_t>& ao_offsets() const {
+    return ao_offsets_;
+  }
+  [[nodiscard]] bool is_pure() const { return is_pure_ != 0; }
+
   // Cached pair list (persist owned for lifetime of BasisBuilder).
   [[nodiscard]] const OwnedAOPairList& pair_list(double threshold = 1e-14) const;
 
@@ -101,6 +110,7 @@ class BasisBuilder {
   std::vector<AOShellHandle> shell_handles_;
   AOBasisHandle basis_;
   uint64_t nao_{0};
+  std::vector<uint64_t> ao_offsets_;
 
   mutable OwnedAOPairList pair_list_;
   mutable bool pair_list_ready_{false};

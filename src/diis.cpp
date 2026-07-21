@@ -44,6 +44,30 @@ void DIIS::push(cublasHandle_t blas, const double* d_err, const double* d_fock) 
   ++count_;
 }
 
+double DIIS::error_rms(cublasHandle_t blas, const double* d_S,
+                      const double* d_Fock, const double* d_D) {
+  const int N = N_;
+  const int n2 = n2_;
+  double one = 1.0, zero = 0.0, minus_one = -1.0;
+
+  // FDS = (F*D)*S
+  cublasDgemm(blas, CUBLAS_OP_N, CUBLAS_OP_N, N, N, N, &one,
+              d_Fock, N, d_D, N, &zero, d_tmp1_, N);
+  cublasDgemm(blas, CUBLAS_OP_N, CUBLAS_OP_N, N, N, N, &one,
+              d_tmp1_, N, d_S, N, &zero, d_tmp2_, N);
+  // SDF = (S*D)*F
+  cublasDgemm(blas, CUBLAS_OP_N, CUBLAS_OP_N, N, N, N, &one,
+              d_S, N, d_D, N, &zero, d_tmp1_, N);
+  cublasDgemm(blas, CUBLAS_OP_N, CUBLAS_OP_N, N, N, N, &one,
+              d_tmp1_, N, d_Fock, N, &zero, d_err_, N);
+  // tmp2 = FDS - SDF
+  cublasDaxpy(blas, n2, &minus_one, d_err_, 1, d_tmp2_, 1);
+
+  double ss = 0.0;
+  cublasDdot(blas, n2, d_tmp2_, 1, d_tmp2_, 1, &ss);
+  return std::sqrt(ss / static_cast<double>(n2));
+}
+
 void DIIS::extrapolate(cublasHandle_t blas, const double* d_S,
                        DeviceArray<double>& d_Fock, const double* d_D) {
   NvtxRange range("DIIS");

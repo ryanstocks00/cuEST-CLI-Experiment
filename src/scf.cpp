@@ -3,21 +3,24 @@
  */
 #include "scf.hpp"
 #include "cuest_wrapper/nvtx.hpp"
+#include "sad_guess.hpp"
 #include <cmath>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
 #include <stdexcept>
+#include <unordered_map>
 
 namespace cuest {
 
 SCFSolver::SCFSolver(CuESTContext& ctx, BasisBuilder& basis,
                      DFJKBuilder& dfjk, XCBuilder* xc,
                      ECPBuilder* ecp_builder, ECPIntegrals* ecp_int,
-                     const Molecule& mol, SCFParams params)
+                     const Molecule& mol, SCFParams params,
+                     const SADGuessConfig* sad_config)
     : ctx_(ctx), basis_(basis), dfjk_(dfjk), xc_(xc),
       ecp_builder_(ecp_builder), ecp_int_(ecp_int),
-      mol_(mol), params_(params) {
+      mol_(mol), params_(params), sad_config_(sad_config) {
   (void)ecp_builder_;
   if (cublasCreate(&cublas_) != CUBLAS_STATUS_SUCCESS)
     throw std::runtime_error("cublasCreate failed");
@@ -157,6 +160,38 @@ void SCFSolver::build_density(DeviceArray<double>& d_C, uint64_t nocc,
               &zero, d_D, N);
 }
 
+void SCFSolver::build_density_auto(DeviceArray<double>& d_C, uint64_t nocc,
+                                   const std::vector<double>& mo_energies,
+                                   DeviceArray<double>& d_D, FrontierGroup& group) {
+  if (!params_.spherical_average_occupation) {
+    build_density(d_C, nocc, d_D);
+    return;
+  }
+  NvtxRange range("build_density_spherical");
+  const int N = static_cast<int>(nao_);
+  if (nocc == 0) {
+    CUDA_CHECK(cudaMemset(d_D, 0, static_cast<size_t>(N) * N * sizeof(double)));
+    return;
+  }
+  if (!group.ready) {
+    // Only trustworthy on the first call, from a bare-Hcore diagonalization
+    // (exactly rotationally symmetric for an isolated atom) — locking it in
+    // here avoids re-deriving it from a potentially already-split (and
+    // therefore self-reinforcing) eigenspectrum on later iterations.
+    auto [lo, hi] = degenerate_frontier_group(mo_energies, static_cast<int>(nocc));
+    group.lo = lo;
+    group.hi = hi;
+    group.ready = true;
+  }
+  std::vector<double> C_h(static_cast<size_t>(N) * N);
+  CUDA_CHECK(cudaMemcpy(C_h.data(), d_C, C_h.size() * sizeof(double),
+                        cudaMemcpyDeviceToHost));
+  std::vector<double> D_h =
+      spherically_averaged_density(C_h, group.lo, group.hi, nao_, nocc);
+  CUDA_CHECK(cudaMemcpy(d_D, D_h.data(), D_h.size() * sizeof(double),
+                        cudaMemcpyHostToDevice));
+}
+
 void SCFSolver::form_total_density() {
   double one = 1.0;
   cublasDcopy(cublas_, nao_*nao_, d_D_a_, 1, d_D_tot_, 1);
@@ -292,7 +327,19 @@ void SCFSolver::diagonalize_fock(DeviceArray<double>& d_Fock,
 }
 
 void SCFSolver::break_beta_symmetry() {
-  if (nocc_a_ != nocc_b_) return;
+  // Originally gated to nocc_a_==nocc_b_ (the "force an open-shell solution
+  // out of an artificially closed-shell guess" trick). But a *naturally*
+  // open-shell radical can have this exact same problem at its β HOMO/LUMO
+  // boundary: e.g. OH's unpaired electron sits in one of two orbitals that
+  // are genuinely degenerate by symmetry (a non-bonding π-like pair
+  // perpendicular to the bond axis) — which one is arbitrary. A spherically
+  // -averaged atomic guess (see sad_guess.hpp) gives that pair *exactly*
+  // equal weight, so the molecular guess starts precisely on the knife-edge
+  // between the two equivalent solutions, and the SCF has to let floating-
+  // point noise slowly (and irreproducibly) nudge it off that ridge —
+  // dozens to hundreds of extra iterations, with wildly run-to-run-variable
+  // counts. Applying the same fixed-angle β HOMO/LUMO mix here regardless of
+  // nocc_a_ vs nocc_b_ breaks that tie deterministically up front instead.
   if (nocc_b_ == 0 || nocc_b_ >= nao_) return;
   double theta = params_.break_symmetry;
   if (std::abs(theta) < 1e-12) return;
@@ -315,68 +362,115 @@ void SCFSolver::break_beta_symmetry() {
     std::cout << "  Symmetry breaking: β HOMO/LUMO mix θ=" << theta << " rad\n";
 }
 
-void SCFSolver::initial_guess() {
-  NvtxRange range("initial_guess");
-  bool use_hcore = (ecp_builder_ && ecp_builder_->has_ecp());
-  int N = static_cast<int>(nao_);
+void SCFSolver::build_sad_guess_fock() {
+  const auto& offsets = basis_.ao_offsets();
+  const int N = static_cast<int>(nao_);
+  if (offsets.size() != mol_.natom() + 1)
+    throw std::runtime_error("SAD guess: BasisBuilder AO offsets unavailable");
 
-  if (use_hcore) {
-    cublasDcopy(cublas_, N*N, d_Hcore_, 1, d_Fock_a_, 1);
-  } else {
-    std::vector<double> S_h(static_cast<size_t>(N*N));
-    cudaMemcpy(S_h.data(), d_S_, static_cast<size_t>(N*N)*sizeof(double),
-               cudaMemcpyDeviceToHost);
-    std::vector<double> D_sad(static_cast<size_t>(N*N), 0.0);
-    std::vector<int> ao_per_atom(mol_.natom(), 0), ao_start(mol_.natom(), 0);
-    int ao_fill = 0;
-    for (size_t a = 0; a < mol_.natom(); a++) {
-      ao_start[a] = ao_fill;
-      int Z = mol_.atom(a).atomic_number;
-      int nao = (Z <= 2) ? 5 : 14;
-      if (Z > 10) nao = (Z <= 18) ? 18 : 27;
-      if (Z > 36) nao = 32;
-      ao_per_atom[a] = std::min(nao, N - ao_fill);
-      ao_fill += ao_per_atom[a];
-    }
-    auto nval = [](int Z) {
-      if (Z <= 2) return Z;
-      if (Z <= 10) return Z - 2;
-      if (Z <= 18) return Z - 10;
-      if (Z <= 36) return Z - 18;
-      return Z - 36;
-    };
-    for (size_t a = 0; a < mol_.natom(); a++) {
-      int nv = nval(mol_.atom(a).atomic_number);
-      int start = ao_start[a], count = ao_per_atom[a];
-      if (count <= 0) continue;
-      double occ = static_cast<double>(nv) / count * 0.5;
-      for (int i = start; i < start + count && i < N; i++)
-        D_sad[static_cast<size_t>(i*N + i)] = occ;
-    }
-    double trDS = 0.0;
+  // Fetch (or compute+cache) each distinct element's converged atomic
+  // reference density once, then place it at that atom's real AO offset.
+  std::unordered_map<int, AtomicGuessDensity> per_element;
+  std::vector<double> Da(static_cast<size_t>(N) * N, 0.0);
+  std::vector<double> Db(static_cast<size_t>(N) * N, 0.0);
+
+  for (size_t a = 0; a < mol_.natom(); a++) {
+    const int Z = mol_.atom(a).atomic_number;
+    auto it = per_element.find(Z);
+    if (it == per_element.end())
+      it = per_element.emplace(Z, get_atomic_guess_density(ctx_, Z, *sad_config_))
+               .first;
+    const AtomicGuessDensity& ad = it->second;
+
+    const uint64_t start = offsets[a];
+    const uint64_t count = offsets[a + 1] - offsets[a];
+    if (ad.nao != count)
+      throw std::runtime_error(
+          "SAD guess: atomic AO count (" + std::to_string(ad.nao) +
+          ") != molecular block size (" + std::to_string(count) +
+          ") for atom " + std::to_string(a) + " (Z=" + std::to_string(Z) + ")");
+
+    for (uint64_t i = 0; i < count; i++)
+      for (uint64_t j = 0; j < count; j++) {
+        Da[(start + i) * static_cast<size_t>(N) + (start + j)] =
+            ad.D_alpha[i * count + j];
+        Db[(start + i) * static_cast<size_t>(N) + (start + j)] =
+            ad.D_beta[i * count + j];
+      }
+  }
+
+  std::vector<double> S_h(static_cast<size_t>(N) * N);
+  CUDA_CHECK(cudaMemcpy(S_h.data(), d_S_, S_h.size() * sizeof(double),
+                        cudaMemcpyDeviceToHost));
+  auto trace_ds = [&](const std::vector<double>& D) {
+    double tr = 0.0;
     for (int i = 0; i < N; i++)
       for (int j = 0; j < N; j++)
-        trDS += D_sad[static_cast<size_t>(i*N+j)] * S_h[static_cast<size_t>(j*N+i)];
-    double target = uks_ ? static_cast<double>(nocc_a_) : static_cast<double>(nocc_);
-    double scale = target / std::max(trDS, 1e-10);
-    for (auto& d : D_sad) d *= scale;
+        tr += D[static_cast<size_t>(i) * N + j] * S_h[static_cast<size_t>(j) * N + i];
+    return tr;
+  };
 
-    std::vector<double> F_init(static_cast<size_t>(N*N));
-    cudaMemcpy(F_init.data(), d_Hcore_, static_cast<size_t>(N*N)*sizeof(double),
-               cudaMemcpyDeviceToHost);
-    const double mix = 0.5;
-    for (int i = 0; i < N*N; i++) F_init[static_cast<size_t>(i)] += mix * D_sad[static_cast<size_t>(i)];
-    cudaMemcpy(d_Fock_a_, F_init.data(), static_cast<size_t>(N*N)*sizeof(double),
-               cudaMemcpyHostToDevice);
+  // Rescale the superposed density to the molecule's actual electron count
+  // (the free-atom sum need not match exactly, e.g. non-neutral molecules).
+  std::vector<double> D_a_guess, D_b_guess;
+  if (uks_) {
+    const double scale_a = static_cast<double>(nocc_a_) / std::max(trace_ds(Da), 1e-10);
+    const double target_b = static_cast<double>(nocc_b_);
+    const double scale_b = target_b > 0.0 ? target_b / std::max(trace_ds(Db), 1e-10) : 0.0;
+    D_a_guess = Da;
+    D_b_guess = Db;
+    for (auto& d : D_a_guess) d *= scale_a;
+    for (auto& d : D_b_guess) d *= scale_b;
+  } else {
+    std::vector<double> D_r(static_cast<size_t>(N) * N);
+    for (size_t k = 0; k < D_r.size(); k++) D_r[k] = 0.5 * (Da[k] + Db[k]);
+    const double scale = static_cast<double>(nocc_) / std::max(trace_ds(D_r), 1e-10);
+    for (auto& d : D_r) d *= scale;
+    D_a_guess = D_r;
+    D_b_guess = std::move(D_r);
+  }
+
+  CUDA_CHECK(cudaMemcpy(d_D_a_, D_a_guess.data(),
+                        D_a_guess.size() * sizeof(double), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_D_b_, D_b_guess.data(),
+                        D_b_guess.size() * sizeof(double), cudaMemcpyHostToDevice));
+
+  // Guess Fock = Hcore + Coulomb of the guess density. K/Vxc need occupied
+  // MO coefficients, which don't exist until diagonalize_fock() runs on
+  // this Fock — the standard SCF loop builds the full Fock from here.
+  double one = 1.0, two = 2.0;
+  if (uks_) {
+    form_total_density();  // d_D_tot_ = d_D_a_ + d_D_b_
+    dfjk_.compute_J(d_D_tot_, d_J_);
+    cublasDcopy(cublas_, N * N, d_Hcore_, 1, d_Fock_a_, 1);
+    cublasDcopy(cublas_, N * N, d_Hcore_, 1, d_Fock_b_, 1);
+    cublasDaxpy(cublas_, N * N, &one, d_J_, 1, d_Fock_a_, 1);
+    cublasDaxpy(cublas_, N * N, &one, d_J_, 1, d_Fock_b_, 1);
+  } else {
+    dfjk_.compute_J(d_D_a_, d_J_);
+    cublasDcopy(cublas_, N * N, d_Hcore_, 1, d_Fock_a_, 1);
+    cublasDaxpy(cublas_, N * N, &two, d_J_, 1, d_Fock_a_, 1);
+  }
+}
+
+void SCFSolver::initial_guess() {
+  NvtxRange range("initial_guess");
+  int N = static_cast<int>(nao_);
+  const bool use_sad = (sad_config_ != nullptr) && !params_.force_hcore_guess;
+
+  if (use_sad) {
+    build_sad_guess_fock();
+  } else {
+    cublasDcopy(cublas_, N*N, d_Hcore_, 1, d_Fock_a_, 1);
+    if (uks_) cublasDcopy(cublas_, N*N, d_Hcore_, 1, d_Fock_b_, 1);
   }
 
   diagonalize_fock(d_Fock_a_, d_C_a_, mo_energies_a_);
-  build_density(d_C_a_, uks_ ? nocc_a_ : nocc_, d_D_a_);
+  build_density_auto(d_C_a_, uks_ ? nocc_a_ : nocc_, mo_energies_a_, d_D_a_, sph_group_a_);
 
   if (uks_) {
-    cublasDcopy(cublas_, N*N, d_C_a_, 1, d_C_b_, 1);
-    mo_energies_b_ = mo_energies_a_;
-    build_density(d_C_b_, nocc_b_, d_D_b_);
+    diagonalize_fock(d_Fock_b_, d_C_b_, mo_energies_b_);
+    build_density_auto(d_C_b_, nocc_b_, mo_energies_b_, d_D_b_, sph_group_b_);
     break_beta_symmetry();
   } else {
     cublasDcopy(cublas_, N*N, d_C_a_, 1, d_C_b_, 1);
@@ -468,16 +562,26 @@ void SCFSolver::run() {
     }
     double rms_d = uks_ ? std::sqrt(0.5 * (rms_a * rms_a + rms_b * rms_b)) : rms_a;
 
+    // DIIS commutator RMS ||FDS-SDF|| (raw Fock/D, before any extrapolation):
+    // how far D is from being a stationary eigenspace of F. Unlike rmsD,
+    // this stays flat under a rotation within an exactly-degenerate frontier
+    // subspace (e.g. an open-shell radical's degenerate SOMO), so it doesn't
+    // stall on that oscillation the way rmsD can.
+    double err_a = diis_a_.error_rms(cublas_, d_S_, d_Fock_a_, d_D_a_);
+    double err_b = uks_ ? diis_b_.error_rms(cublas_, d_S_, d_Fock_b_, d_D_b_) : 0.0;
+    double diis_err = uks_ ? std::sqrt(0.5 * (err_a * err_a + err_b * err_b)) : err_a;
+
     if (params_.print_level >= 1) {
       std::cout << "  Iter " << std::setw(3) << iter_
                 << "  Etot = " << std::setw(16) << std::setprecision(10) << std::fixed << e_total_
                 << "  dE = " << std::setw(12) << std::scientific << dE
-                << "  rmsD = " << std::setw(10) << rms_d;
+                << "  rmsD = " << std::setw(10) << rms_d
+                << "  |FDS-SDF| = " << std::setw(10) << diis_err;
       if (xc_) std::cout << "  Exc = " << std::setw(14) << std::fixed << std::setprecision(8) << e_xc_;
       std::cout << "\n" << std::flush;
     }
 
-    if (iter_ > 1 && rms_d < params_.conv_thresh &&
+    if (iter_ > 1 && diis_err < params_.conv_thresh &&
         std::abs(dE) < params_.energy_conv_thresh) {
       converged_ = true;
       if (params_.verbose)
@@ -496,10 +600,10 @@ void SCFSolver::run() {
       cublasDcopy(cublas_, n2, d_D_b_, 1, d_D_old_b_, 1);
 
     diagonalize_fock(d_Fock_a_, d_C_a_, mo_energies_a_);
-    build_density(d_C_a_, uks_ ? nocc_a_ : nocc_, d_D_a_);
+    build_density_auto(d_C_a_, uks_ ? nocc_a_ : nocc_, mo_energies_a_, d_D_a_, sph_group_a_);
     if (uks_) {
       diagonalize_fock(d_Fock_b_, d_C_b_, mo_energies_b_);
-      build_density(d_C_b_, nocc_b_, d_D_b_);
+      build_density_auto(d_C_b_, nocc_b_, mo_energies_b_, d_D_b_, sph_group_b_);
     } else {
       cublasDcopy(cublas_, n2, d_C_a_, 1, d_C_b_, 1);
       cublasDcopy(cublas_, n2, d_D_a_, 1, d_D_b_, 1);
@@ -515,12 +619,12 @@ void SCFSolver::run() {
           std::cout << "  DIIS rejected (Tr[Da*S]=" << trA << "), using raw Fock\n";
         cublasDcopy(cublas_, n2, d_Fock_save_a_, 1, d_Fock_a_, 1);
         diagonalize_fock(d_Fock_a_, d_C_a_, mo_energies_a_);
-        build_density(d_C_a_, uks_ ? nocc_a_ : nocc_, d_D_a_);
+        build_density_auto(d_C_a_, uks_ ? nocc_a_ : nocc_, mo_energies_a_, d_D_a_, sph_group_a_);
         diis_a_.clear();
         if (uks_) {
           cublasDcopy(cublas_, n2, d_Fock_save_b_, 1, d_Fock_b_, 1);
           diagonalize_fock(d_Fock_b_, d_C_b_, mo_energies_b_);
-          build_density(d_C_b_, nocc_b_, d_D_b_);
+          build_density_auto(d_C_b_, nocc_b_, mo_energies_b_, d_D_b_, sph_group_b_);
           diis_b_.clear();
         }
       }
@@ -538,13 +642,6 @@ void SCFSolver::run() {
     }
 
     e_prev = e_total_;
-
-    if (iter_ >= 25 && (iter_ % 15) == 0 && !converged_) {
-      diis_a_.clear();
-      diis_b_.clear();
-      if (params_.print_level >= 2)
-        std::cout << "  DIIS subspace flushed at iter " << iter_ << "\n";
-    }
   }
 
   form_total_density();
@@ -592,6 +689,8 @@ void SCFSolver::run() {
       }
     }
   }
+
+  if (params_.suppress_output) return;
 
   std::cout << std::setprecision(16) << std::fixed
             << "=== ENERGY_COMPONENTS ===\n"

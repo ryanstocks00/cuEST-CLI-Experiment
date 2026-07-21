@@ -21,10 +21,13 @@ void BasisBuilder::build_from_json(const std::string& json_path) {
   std::vector<uint64_t> shells_per_atom(natom);
   std::vector<cuestAOShell_t> all_shells;
 
+  ao_offsets_.assign(natom + 1, 0);
+
   for (size_t a = 0; a < natom; a++) {
     int Z = mol_.atom(a).atomic_number;
     auto json_shells = reader.get_shells(Z);
     shells_per_atom[a] = 0;
+    uint64_t ao_count = 0;
 
     for (auto& js : json_shells) {
       for (auto& coeffs : js.all_coefficients) {
@@ -42,8 +45,13 @@ void BasisBuilder::build_from_json(const std::string& json_path) {
         AOShellHandle h;
         *h.ptr() = sh;
         shell_handles_.push_back(std::move(h));
+
+        // AOs contributed by this shell: 2L+1 spherical, (L+1)(L+2)/2 Cartesian.
+        const uint64_t L = js.L;
+        ao_count += is_pure_ ? (2 * L + 1) : ((L + 1) * (L + 2) / 2);
       }
     }
+    ao_offsets_[a + 1] = ao_offsets_[a] + ao_count;
   }
 
   cuestWorkspaceDescriptor_t pers_desc{}, temp_desc{};
@@ -62,6 +70,10 @@ void BasisBuilder::build_from_json(const std::string& json_path) {
                  persistent_ws_.ptr(), ctx_.scratch().ptr(), basis_.ptr()));
 
   nao_ = basis_.query<uint64_t>(ctx_, CUEST_AOBASIS_NUM_AO);
+  if (ao_offsets_.back() != nao_)
+    throw std::runtime_error(
+        "BasisBuilder: computed AO offsets (" + std::to_string(ao_offsets_.back()) +
+        ") disagree with cuEST NUM_AO (" + std::to_string(nao_) + ")");
   pair_list_ready_ = false;
 }
 

@@ -23,8 +23,10 @@
 #include "cuest_wrapper/grid.hpp"
 #include "cuest_wrapper/integrals.hpp"
 #include "cuest_wrapper/molecule.hpp"
+#include "dfjk_hybrid.hpp"
 #include "io/parsers.hpp"
 #include "cuest_wrapper/raii.hpp"
+#include "sad_guess.hpp"
 #include "scf.hpp"
 
 using namespace cuest;
@@ -74,7 +76,7 @@ static void print_help(const char* prog) {
       << "  --break-symmetry <rad>   UKS β HOMO/LUMO mix angle (default: 0.3)\n\n"
       << "SCF convergence options:\n"
       << "  --max-iter <n>           Max SCF iterations (default: 250)\n"
-      << "  --conv-thresh <val>      RMS density convergence (default: 1e-8)\n"
+      << "  --conv-thresh <val>      DIIS error |FDS-SDF| convergence (default: 1e-6)\n"
       << "  --energy-conv <val>      Energy change convergence (default: 1e-8)\n"
       << "  --diis-start <n>         Iteration to enable DIIS (default: 1)\n"
       << "  --diis-space <n>         DIIS subspace dimension (default: 15)\n"
@@ -119,7 +121,7 @@ int main(int argc, char* argv[]) {
   int multiplicity = 1;
   double break_symmetry = 0.3;
   int max_iter = 250;
-  double conv_thresh = 1e-8;
+  double conv_thresh = 1e-6;
   double energy_conv = 1e-8;
   int diis_start = 1;
   int diis_space = 15;
@@ -353,30 +355,7 @@ int main(int argc, char* argv[]) {
     auto xyz = mol.xyz_host();
 
     double ex_frac = 0.0, lrc_frac = 0.0, lrc_omega = 0.0;
-    if (xc.is_hf()) {
-      ex_frac = 1.0;
-    } else if (xc.is_hybrid()) {
-      if (xc.is_lrc()) {
-        // Range-separated: plan holds both full-range and LRC fractions.
-        if (functional_name == "CAM-B3LYP") {
-          ex_frac = 0.19; lrc_frac = 0.46; lrc_omega = 0.33;
-        } else if (functional_name == "WB97X" || functional_name == "WB97X-V") {
-          ex_frac = 0.157706; lrc_frac = 0.842294; lrc_omega = 0.3;
-        } else if (functional_name == "WB97M-V") {
-          ex_frac = 0.15; lrc_frac = 0.85; lrc_omega = 0.3;
-        } else if (functional_name == "LC-WPBE" || functional_name == "LC-WPBEH") {
-          ex_frac = 0.0; lrc_frac = 1.0; lrc_omega = 0.4;
-        } else if (functional_name == "HSE06") {
-          ex_frac = 0.25; lrc_frac = -0.25; lrc_omega = 0.11;
-        } else {
-          // Fallback: use XC query scale as full-range HF only
-          ex_frac = xc.exchange_scale();
-        }
-      } else {
-        // Global hybrids (B3LYP, PBE0, ...): EXCHANGE_FRACTION = HF scale
-        ex_frac = xc.exchange_scale();
-      }
-    }
+    hybrid_dfjk_fractions(functional_id, xc, ex_frac, lrc_frac, lrc_omega);
 
     auto dfjk = std::make_unique<DFJKBuilder>(
         ctx, basis_builder.basis(), aux_basis->basis(),
@@ -409,9 +388,18 @@ int main(int argc, char* argv[]) {
     scf_params.use_jit = use_jit;
 
     // --- Run SCF ---
+    SADGuessConfig sad_cfg;
+    sad_cfg.basis_path = basis_path;
+    sad_cfg.aux_basis_path = aux_basis_path;
+    sad_cfg.functional_id = functional_id;
+    sad_cfg.radial_pts = radial_pts;
+    sad_cfg.angular_pts = angular_pts;
+    sad_cfg.is_pure = (is_pure != 0);
+    sad_cfg.use_jit = use_jit;
+
     SCFSolver scf(ctx, basis_builder, *dfjk_ptr, &xc,
                    ecp_builder_ptr, ecp_int_ptr,
-                   mol, scf_params);
+                   mol, scf_params, &sad_cfg);
     scf.run();
 
     // --- Gradient computation ---

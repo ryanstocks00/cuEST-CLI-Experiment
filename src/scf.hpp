@@ -18,9 +18,23 @@
 
 namespace cuest {
 
+struct SADGuessConfig;
+
+/// Cached [lo, hi) degenerate-frontier orbital range for one spin channel
+/// (see sad_guess.hpp) — detected once from the first, exactly-symmetric
+/// Hcore diagonalization, then held fixed for the rest of the SCF.
+struct FrontierGroup {
+  int lo{-1};
+  int hi{-1};
+  bool ready{false};
+};
+
 struct SCFParams {
   int max_iter{250};
-  double conv_thresh{1e-8};
+  /// Threshold on the DIIS commutator RMS ||FDS-SDF|| (see DIIS::error_rms),
+  /// not density RMS — insensitive to harmless rotation within an exactly-
+  /// degenerate occupied subspace, unlike a raw density-RMS criterion.
+  double conv_thresh{1e-6};
   double energy_conv_thresh{1e-8};
   int diis_start{1};
   int diis_max_space{15};
@@ -32,14 +46,36 @@ struct SCFParams {
   double break_symmetry{0.3};
   /// Use cuEST JIT kernels (DF-J, nuclear potential, …). Off ⇒ AOT + fp64.
   bool use_jit{true};
+  /// Force the zero-density (core Hamiltonian) initial guess, skipping SAD.
+  /// Used for the isolated-atom reference SCF that SAD itself calls (see
+  /// sad_guess.cpp) so it doesn't recurse into building its own SAD guess.
+  bool force_hcore_guess{false};
+  /// Suppress the machine-readable ENERGY_COMPONENTS block (printed
+  /// unconditionally otherwise, even under --quiet). Used for the isolated
+  /// atomic reference SCFs so they don't interleave a second energy block
+  /// ahead of the real molecular result on stdout.
+  bool suppress_output{false};
+  /// Give every orbital in the HOMO/LUMO-straddling degenerate group equal
+  /// fractional occupation (see sad_guess.hpp) instead of a hard integer
+  /// cutoff, at *every* iteration. Needed for the isolated-atom SAD
+  /// reference: occupying one arbitrary real orbital out of a partially
+  /// filled degenerate shell (e.g. only px, py of a p2 configuration) feeds
+  /// an anisotropic density into J/K/Vxc, which then splits the degeneracy
+  /// self-consistently — symmetrizing only the final density isn't enough.
+  bool spherical_average_occupation{false};
 };
 
 class SCFSolver {
  public:
+  /// `sad_config`, if non-null, enables the atomic-superposition initial
+  /// guess (see sad_guess.hpp); must outlive this SCFSolver. Pass nullptr
+  /// (or set params.force_hcore_guess) to fall back to the core-Hamiltonian
+  /// guess.
   SCFSolver(CuESTContext& ctx, BasisBuilder& basis,
             DFJKBuilder& dfjk, XCBuilder* xc,
             ECPBuilder* ecp_builder, ECPIntegrals* ecp_int,
-            const Molecule& mol, SCFParams params);
+            const Molecule& mol, SCFParams params,
+            const SADGuessConfig* sad_config = nullptr);
   ~SCFSolver();
 
   void run();
@@ -98,8 +134,21 @@ class SCFSolver {
   void diagonalize_fock(DeviceArray<double>& d_Fock, DeviceArray<double>& d_C,
                         std::vector<double>& mo_energies);
   void build_density(DeviceArray<double>& d_C, uint64_t nocc, DeviceArray<double>& d_D);
+  /// Dispatches to build_density(), or to the spherically-averaged density
+  /// (sad_guess.hpp) when params_.spherical_average_occupation is set —
+  /// in which case `group` is detected once (from the first call) and then
+  /// held fixed; see FrontierGroup.
+  void build_density_auto(DeviceArray<double>& d_C, uint64_t nocc,
+                          const std::vector<double>& mo_energies,
+                          DeviceArray<double>& d_D, FrontierGroup& group);
   void form_total_density();
   void initial_guess();
+  /// Assemble the block-diagonal SAD guess density (from cached atomic
+  /// references, placed at basis_.ao_offsets()) and build d_Fock_a_/d_Fock_b_
+  /// as Hcore + J[D_guess]. K/Vxc are deliberately omitted here: they need
+  /// occupied MO coefficients, which don't exist until this Fock is
+  /// diagonalized for the first time.
+  void build_sad_guess_fock();
   void break_beta_symmetry();
   /// Frobenius Tr(A^T B) ≡ ∑ A_ij B_ij (valid for symmetric energy matrices).
   double frobenius_dot(const double* d_A, const double* d_B, int n2);
@@ -113,6 +162,7 @@ class SCFSolver {
   ECPIntegrals* ecp_int_;
   const Molecule& mol_;
   SCFParams params_;
+  const SADGuessConfig* sad_config_;
 
   cublasHandle_t cublas_{};
   cusolverDnHandle_t cusolver_{};
@@ -142,6 +192,8 @@ class SCFSolver {
 
   DeviceArray<double> d_rms_scratch_;
   DIIS diis_a_, diis_b_;
+
+  FrontierGroup sph_group_a_, sph_group_b_;
 };
 
 }  // namespace cuest

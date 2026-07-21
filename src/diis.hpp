@@ -29,6 +29,16 @@ class DIIS {
   void extrapolate(cublasHandle_t blas, const double* d_S,
                    DeviceArray<double>& d_Fock, const double* d_D);
 
+  /// RMS of the (raw, pre-extrapolation) commutator FDS − SDF — how far D is
+  /// from commuting with F, i.e. from being a stationary SCF solution.
+  /// Unlike density RMS between iterations, this is insensitive to a
+  /// rotation within an exactly-degenerate occupied/frontier subspace (a
+  /// classic source of stalled convergence for open-shell radicals with a
+  /// degenerate SOMO), since such a rotation leaves [F, D] at zero. Does not
+  /// touch the DIIS history (safe to call before push()/extrapolate()).
+  double error_rms(cublasHandle_t blas, const double* d_S, const double* d_Fock,
+                   const double* d_D);
+
  private:
   void push(cublasHandle_t blas, const double* d_err, const double* d_fock);
   double* err_col(int j) { return d_E_.get() + static_cast<size_t>(j) * n2_; }
