@@ -16,6 +16,7 @@
 
 #include "context.hpp"
 #include "molecule.hpp"
+#include "nvtx.hpp"
 #include "raii.hpp"
 
 namespace cuest {
@@ -95,11 +96,12 @@ inline MolecularGridHandle GridBuilder::build() {
                                       radial_nodes, radial_weights);
 
     AtomGridHandle ag;
-    CUEST_CHECK(cuestAtomGridCreate(
-        ctx_, radial_pts_,
-        radial_nodes.data(), radial_weights.data(),
-        angular_pts_per_radial.data(),
-        AtomGridParams{}, ag.ptr()));
+    CUEST_NVTX("cuestAtomGridCreate",
+               cuestAtomGridCreate(
+                   ctx_, radial_pts_,
+                   radial_nodes.data(), radial_weights.data(),
+                   angular_pts_per_radial.data(),
+                   AtomGridParams{}, ag.ptr()));
     atom_grids[i] = ag.get();
     atom_grid_handles.push_back(std::move(ag));
   }
@@ -115,10 +117,11 @@ inline MolecularGridHandle GridBuilder::build() {
   grid_persist_ws_ = Workspace(pers_desc);
   Workspace temp_ws(temp_desc);
 
-  CUEST_CHECK(cuestMolecularGridCreate(
-      ctx_, natom, atom_grids.data(), xyz_h.data(),
-      MolecularGridParams{}, grid_persist_ws_.ptr(), temp_ws.ptr(),
-      mol_grid.ptr()));
+  CUEST_NVTX("cuestMolecularGridCreate",
+             cuestMolecularGridCreate(
+                 ctx_, natom, atom_grids.data(), xyz_h.data(),
+                 MolecularGridParams{}, grid_persist_ws_.ptr(), temp_ws.ptr(),
+                 mol_grid.ptr()));
 
   // Atom grids can be destroyed; molecular grid has what it needs.
   atom_grid_handles.clear();

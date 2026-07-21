@@ -7,14 +7,13 @@
  *   - Destroys the handle in the destructor
  *   - Is move-only (no copies)
  *   - Provides implicit conversion to the raw handle for API calls
- *   - Has factory static methods for standard create/destroy lifecycle
+ *   - Carries a cuestType_t tag for typed cuestQuery helpers
  */
 
 #include <cuda_runtime.h>
 #include <cuest.h>
 
 #include <iostream>
-#include <memory>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -55,9 +54,12 @@ class Parameters;
 // ---------------------------------------------------------------------------
 // Generic RAII handle wrapper
 // ---------------------------------------------------------------------------
-template <typename HandleT, auto DestroyFn, auto... QueryFns>
+// Type is the cuestType_t tag for cuestQuery (e.g. CUEST_AOBASIS).
+template <typename HandleT, auto DestroyFn, cuestType_t Type>
 class Handle {
  public:
+  static constexpr cuestType_t object_type = Type;
+
   Handle() : h_(nullptr) {}
   explicit Handle(HandleT h) : h_(h) {}
   ~Handle() { reset(); }
@@ -81,7 +83,7 @@ class Handle {
 
   HandleT* ptr() { return &h_; }
 
-  void reset() {
+  void reset() noexcept {
     if (h_) {
       cuestStatus_t st = DestroyFn(h_);
       if (st != CUEST_STATUS_SUCCESS) {
@@ -91,10 +93,18 @@ class Handle {
     }
   }
 
-  HandleT release() {
+  HandleT release() noexcept {
     HandleT tmp = h_;
     h_ = nullptr;
     return tmp;
+  }
+
+  /// Typed cuestQuery using this handle's object type tag.
+  template <typename T, typename AttrT>
+  [[nodiscard]] T query(cuestHandle_t ctx, AttrT attr) const {
+    T val{};
+    CUEST_CHECK(cuestQuery(ctx, Type, h_, attr, &val, sizeof(val)));
+    return val;
   }
 
  private:
@@ -104,126 +114,34 @@ class Handle {
 // ---------------------------------------------------------------------------
 // Concrete handle types
 // ---------------------------------------------------------------------------
-
-// cuEST global handle
-struct CuEST {
-  using HandleT = cuestHandle_t;
-  static cuestStatus_t destroy(cuestHandle_t h) { return cuestDestroy(h); }
-};
 using CuESTHandle = Handle<cuestHandle_t, cuestDestroy, CUEST_HANDLE>;
-
-// AO Shell
-struct AOShellTraits {
-  using HandleT = cuestAOShell_t;
-  static cuestStatus_t destroy(cuestAOShell_t h) { return cuestAOShellDestroy(h); }
-};
 using AOShellHandle = Handle<cuestAOShell_t, cuestAOShellDestroy, CUEST_AOSHELL>;
-
-// AO Basis
 using AOBasisHandle =
     Handle<cuestAOBasis_t, cuestAOBasisDestroy, CUEST_AOBASIS>;
-
-// AO PairList
 using AOPairListHandle =
     Handle<cuestAOPairList_t, cuestAOPairListDestroy, CUEST_AOPAIRLIST>;
-
-// ECP Shell
 using ECPShellHandle =
     Handle<cuestECPShell_t, cuestECPShellDestroy, CUEST_ECPSHELL>;
-
-// ECP Atom
 using ECPAtomHandle =
     Handle<cuestECPAtom_t, cuestECPAtomDestroy, CUEST_ECPATOM>;
-
-// One-electron integral plan
 using OEIntPlanHandle =
     Handle<cuestOEIntPlan_t, cuestOEIntPlanDestroy, CUEST_OEINTPLAN>;
-
-// ECP integral plan
 using ECPIntPlanHandle =
     Handle<cuestECPIntPlan_t, cuestECPIntPlanDestroy, CUEST_ECPINTPLAN>;
-
-// DF integral plan
 using DFIntPlanHandle =
     Handle<cuestDFIntPlan_t, cuestDFIntPlanDestroy, CUEST_DFINTPLAN>;
-
-// Atom grid
 using AtomGridHandle =
     Handle<cuestAtomGrid_t, cuestAtomGridDestroy, CUEST_ATOMGRID>;
-
-// Molecular grid
 using MolecularGridHandle =
     Handle<cuestMolecularGrid_t, cuestMolecularGridDestroy,
            CUEST_MOLECULARGRID>;
-
-// XC integral plan
 using XCIntPlanHandle =
     Handle<cuestXCIntPlan_t, cuestXCIntPlanDestroy, CUEST_XCINTPLAN>;
 
 // ---------------------------------------------------------------------------
-// Workspace RAII wrapper
+// Device memory RAII wrapper (typed GPU buffer; size is in bytes)
 // ---------------------------------------------------------------------------
-class Workspace {
- public:
-  Workspace() = default;
-
-  explicit Workspace(const cuestWorkspaceDescriptor_t& desc) {
-    if (desc.hostBufferSizeInBytes) {
-      host_buf_ = std::unique_ptr<uint8_t[]>{
-          new uint8_t[desc.hostBufferSizeInBytes]};
-    }
-    if (desc.deviceBufferSizeInBytes) {
-      uint8_t* dev = nullptr;
-      if (cudaMalloc(&dev, desc.deviceBufferSizeInBytes) != cudaSuccess) {
-        throw std::runtime_error("Failed to allocate device workspace");
-      }
-      dev_buf_ = dev;
-    }
-    ws_.hostBuffer = reinterpret_cast<uintptr_t>(host_buf_.get());
-    ws_.hostBufferSizeInBytes = desc.hostBufferSizeInBytes;
-    ws_.deviceBuffer = reinterpret_cast<uintptr_t>(dev_buf_);
-    ws_.deviceBufferSizeInBytes = desc.deviceBufferSizeInBytes;
-  }
-
-  ~Workspace() {
-    if (dev_buf_) cudaFree(dev_buf_);
-  }
-
-  Workspace(const Workspace&) = delete;
-  Workspace& operator=(const Workspace&) = delete;
-
-  Workspace(Workspace&& other) noexcept
-      : ws_(other.ws_),
-        host_buf_(std::move(other.host_buf_)),
-        dev_buf_(other.dev_buf_) {
-    other.ws_ = {};
-    other.dev_buf_ = nullptr;
-  }
-
-  Workspace& operator=(Workspace&& other) noexcept {
-    if (this != &other) {
-      if (dev_buf_) cudaFree(dev_buf_);
-      ws_ = other.ws_;
-      host_buf_ = std::move(other.host_buf_);
-      dev_buf_ = other.dev_buf_;
-      other.ws_ = {};
-      other.dev_buf_ = nullptr;
-    }
-    return *this;
-  }
-
-  cuestWorkspace_t* ptr() { return &ws_; }
-  cuestWorkspace_t& get() { return ws_; }
-
- private:
-  cuestWorkspace_t ws_{};
-  std::unique_ptr<uint8_t[]> host_buf_{nullptr};
-  uint8_t* dev_buf_{nullptr};
-};
-
-// ---------------------------------------------------------------------------
-// Device memory RAII wrapper
-// ---------------------------------------------------------------------------
+template <typename T>
 class DeviceArray {
  public:
   DeviceArray() = default;
@@ -252,7 +170,8 @@ class DeviceArray {
       cudaFree(ptr_);
       ptr_ = nullptr;
     }
-    double* fresh = nullptr;
+    if (bytes == 0) return;
+    T* fresh = nullptr;
     if (cudaMalloc(&fresh, bytes) != cudaSuccess) {
       throw std::runtime_error("Failed to allocate GPU memory (" +
                                std::to_string(bytes) + " bytes)");
@@ -260,34 +179,81 @@ class DeviceArray {
     ptr_ = fresh;
   }
 
-  double* get() { return ptr_; }
-  const double* get() const { return ptr_; }
-  operator double*() { return ptr_; }
-  operator const double*() const { return ptr_; }
+  T* get() { return ptr_; }
+  const T* get() const { return ptr_; }
+  operator T*() { return ptr_; }
+  operator const T*() const { return ptr_; }
   bool valid() const { return ptr_ != nullptr; }
 
-  std::vector<double> copy_to_host(size_t count) const {
-    std::vector<double> host(count);
-    if (cudaMemcpy(host.data(), ptr_, count * sizeof(double),
+  std::vector<T> copy_to_host(size_t count) const {
+    std::vector<T> host(count);
+    if (cudaMemcpy(host.data(), ptr_, count * sizeof(T),
                    cudaMemcpyDeviceToHost) != cudaSuccess) {
       throw std::runtime_error("Device to host copy failed");
     }
     return host;
   }
 
-  void copy_from_host(const std::vector<double>& host) {
+  void copy_from_host(const std::vector<T>& host) {
     copy_from_host(host.data(), host.size());
   }
 
-  void copy_from_host(const double* host, size_t count) {
-    if (cudaMemcpy(ptr_, host, count * sizeof(double),
+  void copy_from_host(const T* host, size_t count) {
+    if (cudaMemcpy(ptr_, host, count * sizeof(T),
                    cudaMemcpyHostToDevice) != cudaSuccess) {
       throw std::runtime_error("Host to device copy failed");
     }
   }
 
  private:
-  double* ptr_{nullptr};
+  T* ptr_{nullptr};
+};
+
+// ---------------------------------------------------------------------------
+// Workspace RAII wrapper (cuEST scratch: host vector + device bytes)
+// ---------------------------------------------------------------------------
+class Workspace {
+ public:
+  Workspace() = default;
+
+  explicit Workspace(const cuestWorkspaceDescriptor_t& desc) {
+    if (desc.hostBufferSizeInBytes)
+      host_buf_.resize(desc.hostBufferSizeInBytes);
+    if (desc.deviceBufferSizeInBytes)
+      dev_buf_.alloc(desc.deviceBufferSizeInBytes);
+    ws_.hostBuffer = reinterpret_cast<uintptr_t>(host_buf_.data());
+    ws_.hostBufferSizeInBytes = desc.hostBufferSizeInBytes;
+    ws_.deviceBuffer = reinterpret_cast<uintptr_t>(dev_buf_.get());
+    ws_.deviceBufferSizeInBytes = desc.deviceBufferSizeInBytes;
+  }
+
+  Workspace(const Workspace&) = delete;
+  Workspace& operator=(const Workspace&) = delete;
+
+  Workspace(Workspace&& other) noexcept
+      : ws_(other.ws_),
+        host_buf_(std::move(other.host_buf_)),
+        dev_buf_(std::move(other.dev_buf_)) {
+    other.ws_ = {};
+  }
+
+  Workspace& operator=(Workspace&& other) noexcept {
+    if (this != &other) {
+      ws_ = other.ws_;
+      host_buf_ = std::move(other.host_buf_);
+      dev_buf_ = std::move(other.dev_buf_);
+      other.ws_ = {};
+    }
+    return *this;
+  }
+
+  cuestWorkspace_t* ptr() { return &ws_; }
+  cuestWorkspace_t& get() { return ws_; }
+
+ private:
+  cuestWorkspace_t ws_{};
+  std::vector<uint8_t> host_buf_;
+  DeviceArray<uint8_t> dev_buf_;
 };
 
 // ---------------------------------------------------------------------------

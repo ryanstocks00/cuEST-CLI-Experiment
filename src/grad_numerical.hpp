@@ -19,7 +19,7 @@
 #include <vector>
 #include "cuest_wrapper/constants.hpp"
 #include "cuest_wrapper/molecule.hpp"
-#include "cuest_wrapper/scf.hpp"
+#include "scf.hpp"
 
 namespace cuest {
 

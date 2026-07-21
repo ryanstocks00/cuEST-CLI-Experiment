@@ -23,10 +23,9 @@
 #include "cuest_wrapper/grid.hpp"
 #include "cuest_wrapper/integrals.hpp"
 #include "cuest_wrapper/molecule.hpp"
-#include "cuest_wrapper/parsers.hpp"
+#include "io/parsers.hpp"
 #include "cuest_wrapper/raii.hpp"
-#include "cuest_wrapper/scf.hpp"
-#include "cuest_wrapper/shell_norm.hpp"
+#include "scf.hpp"
 
 using namespace cuest;
 
@@ -278,7 +277,7 @@ int main(int argc, char* argv[]) {
                           << " (spherical)\n";
     auto aux_basis = std::make_unique<AuxBasis>(ctx, mol, /*is_pure=*/1);
     aux_basis->build_from_json(aux_basis_path);
-    uint64_t naux = ctx.query_nao(aux_basis->basis());
+    uint64_t naux = ctx.query_nao(aux_basis->handle());
     if (!quiet) std::cout << "  Auxiliary basis functions: " << naux << "\n";
 
     // --- Build ECP from JSON (auto-detected) and apply Z_eff ---

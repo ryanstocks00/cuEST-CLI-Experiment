@@ -33,13 +33,11 @@ option(CUEST_ENABLE_JIT "Enable JIT compilation (requires CUDA 13+)" ON)
 option(CUEST_USE_STATIC "Use static cuEST library" OFF)
 
 # ---------------------------------------------------------------------------
-# cuest_wrapper — standalone RAII library around the cuEST C API
+# cuest_wrapper — minimal C++ RAII interface over the cuEST C API
+# (no JSON / XYZ I/O / SCF — those live in the application)
 # ---------------------------------------------------------------------------
 add_library(cuest_wrapper STATIC
-  cuest_wrapper/src/basis_nvidia.cpp
-  cuest_wrapper/src/basis_ecp.cpp
   cuest_wrapper/src/integrals.cpp
-  cuest_wrapper/src/scf.cpp
 )
 
 target_include_directories(cuest_wrapper PUBLIC
@@ -59,6 +57,7 @@ target_link_libraries(cuest_wrapper PUBLIC
   CUDA::cusolver
   CUDA::cudart
   CUDA::cuda_driver
+  CUDA::nvtx3
   ${CUEST_LIBRARY}
   m
 )
@@ -69,10 +68,17 @@ target_compile_options(cuest_wrapper PRIVATE
 )
 
 # ---------------------------------------------------------------------------
-# cuest_dft — CLI driver
+# cuest_dft — CLI driver (JSON/XYZ I/O, SCF, basis-from-BSE)
 # ---------------------------------------------------------------------------
 add_executable(cuest_dft
   src/main.cpp
+  src/scf.cpp
+  src/basis_from_json.cpp
+  src/basis_ecp_from_json.cpp
+)
+
+target_include_directories(cuest_dft PRIVATE
+  ${CMAKE_SOURCE_DIR}/src
 )
 
 target_link_libraries(cuest_dft PRIVATE cuest_wrapper)

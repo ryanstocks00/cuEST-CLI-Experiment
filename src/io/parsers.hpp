@@ -11,8 +11,8 @@
 #include <string>
 #include <vector>
 
-#include "constants.hpp"
-#include "molecule.hpp"
+#include "cuest_wrapper/constants.hpp"
+#include "cuest_wrapper/molecule.hpp"
 
 namespace cuest {
 

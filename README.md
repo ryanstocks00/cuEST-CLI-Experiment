@@ -57,10 +57,12 @@ Orbital ↔ auxiliary pairings used by the validators (`test/common.py`):
 | cc-pVDZ | def2-universal-jkfit (no cc-pvdz-jkfit on BSE) |
 | cc-pVTZ / VQZ | matching `cc-pV*Z-jkfit` |
 
-Default `test/reference.json` matrix: all molecules × {PBE, WB97X} × all
-bases × {spherical, Cartesian} orbitals, with SCF iteration counts.
-Gradients are stored for spherical-orbital refs only (analytic DF). The DF auxiliary basis is always spherical (cuEST requirement;
-`--cartesian` applies to the primary basis only). Regenerate with:
+Default `test/reference.json` matrix: closed-shell molecules × {HF, PBE, WB97X}
+× all bases × {spherical, Cartesian}, plus UKS OH (mult=2) × {HF, PBE, PBE0, WB97X}
+× selected bases. SCF iteration counts included. Gradients are stored for
+spherical-orbital refs only (analytic DF; hybrids skip known-bad SP-only cases).
+The DF auxiliary basis is always spherical (cuEST requirement; `--cartesian`
+applies to the primary basis only). Regenerate with:
 
 ```bash
 python3 test/generate_reference.py
@@ -192,27 +194,30 @@ Agreement with numerical finite-difference and PySCF reference gradients is < 1e
 ## Architecture
 
 ```
-cuest_wrapper/                 # Standalone RAII library (STATIC)
+cuest_wrapper/                 # Minimal C++ RAII over cuEST C API (STATIC)
 ├── include/cuest_wrapper/
-│   ├── raii.hpp               # C++ RAII wrappers for cuEST handles
-│   ├── context.hpp            # cuEST context management
+│   ├── raii.hpp               # Handle / Workspace / Parameters RAII
+│   ├── nvtx.hpp               # NvtxRange + CUEST_NVTX for Nsight timelines
+│   ├── context.hpp            # cuEST context
 │   ├── molecule.hpp           # Molecular geometry + Z_eff / charge
-│   ├── parsers.hpp            # XYZ file parsers
-│   ├── shell_norm.hpp         # Gaussian basis normalization
-│   ├── basis.hpp / basis_json.hpp
-│   ├── integrals.hpp          # 1e, DF-J, XC, ECP integral wrappers
+│   ├── constants.hpp          # Physical constants / unit helpers
+│   ├── shell_norm.hpp         # Gaussian shell normalization
+│   ├── basis.hpp              # AO / aux / ECP ownership (build_from_json in app)
+│   ├── integrals.hpp          # 1e, DF-J/K, XC, ECP wrappers
 │   ├── grid.hpp               # DFT integration grid (Becke+Ahlrichs)
-│   ├── scf.hpp                # SCF solver with DIIS + cuSOLVER
 │   └── gradients.hpp          # Analytical gradient APIs
 └── src/
-    ├── basis_nvidia.cpp       # BasisBuilder / AuxBasis from BSE JSON
-    ├── basis_ecp.cpp          # ECPBuilder implementation
-    ├── integrals.cpp
-    └── scf.cpp
+    └── integrals.cpp
 
-src/                           # CLI driver
+src/                           # CLI / application layer
 ├── main.cpp                   # cuest_dft entry point
-└── grad_numerical.hpp         # FD gradients via subprocess
+├── scf.hpp / scf.cpp          # SCF solver with DIIS + cuSOLVER
+├── basis_from_json.cpp        # BasisBuilder / AuxBasis from BSE JSON
+├── basis_ecp_from_json.cpp    # ECPBuilder from BSE JSON
+├── grad_numerical.hpp         # FD gradients via subprocess
+└── io/
+    ├── parsers.hpp            # XYZ file parsers
+    └── basis_json.hpp         # BSE JSON reader
 
 test/
 ├── common.py                  # Shared BSE→PySCF, parsers, runners

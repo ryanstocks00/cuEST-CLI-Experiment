@@ -9,6 +9,8 @@
  *
  * BSE often stores numeric fields as JSON strings (for precision / Fortran
  * D-exponents); helpers below accept either string or number.
+ *
+ * Lives in the application layer (not the cuEST RAII wrapper).
  */
 
 #include <cstdint>
@@ -19,7 +21,7 @@
 
 #include <nlohmann/json.hpp>
 
-#include "molecule.hpp"
+#include "cuest_wrapper/molecule.hpp"
 
 namespace cuest {
 

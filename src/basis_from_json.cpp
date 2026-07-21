@@ -1,9 +1,10 @@
 /**
- * @file basis_nvidia.cpp
- * @brief BasisBuilder and AuxBasis — build cuEST AO shells from BSE JSON.
+ * @file basis_from_json.cpp
+ * @brief BasisBuilder / AuxBasis — build cuEST AO shells from BSE JSON (app layer).
  */
 #include "cuest_wrapper/basis.hpp"
-#include "cuest_wrapper/basis_json.hpp"
+#include "cuest_wrapper/nvtx.hpp"
+#include "io/basis_json.hpp"
 #include <cuda_runtime.h>
 #include <cuest.h>
 #include <cstdint>
@@ -31,10 +32,11 @@ void BasisBuilder::build_from_json(const std::string& json_path) {
                                                      js.exponents.data(),
                                                      coeffs.data());
         cuestAOShell_t sh;
-        CUEST_CHECK(cuestAOShellCreate(
-            static_cast<cuestHandle_t>(ctx_), is_pure_, js.L, js.nprim,
-            js.exponents.data(), norm.data(),
-            AOShellParams{}, &sh));
+        CUEST_NVTX("cuestAOShellCreate",
+                   cuestAOShellCreate(
+                       static_cast<cuestHandle_t>(ctx_), is_pure_, js.L, js.nprim,
+                       js.exponents.data(), norm.data(),
+                       AOShellParams{}, &sh));
         all_shells.push_back(sh);
         shells_per_atom[a]++;
         AOShellHandle h;
@@ -53,12 +55,13 @@ void BasisBuilder::build_from_json(const std::string& json_path) {
 
   persistent_ws_ = Workspace(pers_desc);
   Workspace temp_ws(temp_desc);
-  CUEST_CHECK(cuestAOBasisCreate(
-      static_cast<cuestHandle_t>(ctx_), natom, shells_per_atom.data(),
-      all_shells.data(), ao_params,
-      persistent_ws_.ptr(), temp_ws.ptr(), basis_.ptr()));
+  CUEST_NVTX("cuestAOBasisCreate",
+             cuestAOBasisCreate(
+                 static_cast<cuestHandle_t>(ctx_), natom, shells_per_atom.data(),
+                 all_shells.data(), ao_params,
+                 persistent_ws_.ptr(), temp_ws.ptr(), basis_.ptr()));
 
-  nao_ = ctx_.query_nao(basis_.get());
+  nao_ = basis_.query<uint64_t>(ctx_, CUEST_AOBASIS_NUM_AO);
   pair_list_ready_ = false;
 }
 
@@ -80,10 +83,11 @@ void AuxBasis::build_from_json(const std::string& json_path) {
                                                      js.exponents.data(),
                                                      coeffs.data());
         cuestAOShell_t sh;
-        CUEST_CHECK(cuestAOShellCreate(
-            static_cast<cuestHandle_t>(ctx_), is_pure_, js.L, js.nprim,
-            js.exponents.data(), norm.data(),
-            AOShellParams{}, &sh));
+        CUEST_NVTX("cuestAOShellCreate",
+                   cuestAOShellCreate(
+                       static_cast<cuestHandle_t>(ctx_), is_pure_, js.L, js.nprim,
+                       js.exponents.data(), norm.data(),
+                       AOShellParams{}, &sh));
         all_shells.push_back(sh);
         shells_per_atom[a]++;
         AOShellHandle h;
@@ -102,10 +106,11 @@ void AuxBasis::build_from_json(const std::string& json_path) {
 
   persist_ws_ = Workspace(pers_desc);
   Workspace temp_ws(temp_desc);
-  CUEST_CHECK(cuestAOBasisCreate(
-      static_cast<cuestHandle_t>(ctx_), natom, shells_per_atom.data(),
-      all_shells.data(), aux_params,
-      persist_ws_.ptr(), temp_ws.ptr(), basis_.ptr()));
+  CUEST_NVTX("cuestAOBasisCreate",
+             cuestAOBasisCreate(
+                 static_cast<cuestHandle_t>(ctx_), natom, shells_per_atom.data(),
+                 all_shells.data(), aux_params,
+                 persist_ws_.ptr(), temp_ws.ptr(), basis_.ptr()));
 }
 
 const OwnedAOPairList& BasisBuilder::pair_list(double threshold) const {
@@ -123,9 +128,10 @@ const OwnedAOPairList& BasisBuilder::pair_list(double threshold) const {
 
   pl.persist = Workspace(pers_desc);
   Workspace temp_ws(temp_desc);
-  CUEST_CHECK(cuestAOPairListCreate(
-      static_cast<cuestHandle_t>(ctx_), basis_.get(), natom, xyz_h.data(),
-      threshold, pl_params, pl.persist.ptr(), temp_ws.ptr(), pl.handle.ptr()));
+  CUEST_NVTX("cuestAOPairListCreate",
+             cuestAOPairListCreate(
+                 static_cast<cuestHandle_t>(ctx_), basis_.get(), natom, xyz_h.data(),
+                 threshold, pl_params, pl.persist.ptr(), temp_ws.ptr(), pl.handle.ptr()));
 
   pair_list_ = std::move(pl);
   pair_list_ready_ = true;

@@ -1,9 +1,10 @@
 /**
- * @file basis_ecp.cpp
- * @brief ECP builder — extracts ECP data from BSE JSON.
+ * @file basis_ecp_from_json.cpp
+ * @brief ECP builder — extracts ECP data from BSE JSON (app layer).
  */
 #include "cuest_wrapper/basis.hpp"
-#include "cuest_wrapper/basis_json.hpp"
+#include "cuest_wrapper/nvtx.hpp"
+#include "io/basis_json.hpp"
 #include <cuda_runtime.h>
 #include <cuest.h>
 #include <algorithm>
@@ -44,21 +45,23 @@ void ECPBuilder::build_from_json(const std::string& json_path) {
     // Validate / sort so shells[i] has angular momentum L == i (cuEST contract).
     // BSE typically provides ul (max L) first, then L=0..Lmax-1.
     ECPShellHandle top;
-    CUEST_CHECK(cuestECPShellCreate(
-        static_cast<cuestHandle_t>(ctx_),
-        ecp.shell_types[0], ecp.num_primitives[0],
-        ecp.Ns.data(), ecp.coefficients.data(), ecp.exponents.data(),
-        ECPShellParams{}, top.ptr()));
+    CUEST_NVTX("cuestECPShellCreate",
+               cuestECPShellCreate(
+                   static_cast<cuestHandle_t>(ctx_),
+                   ecp.shell_types[0], ecp.num_primitives[0],
+                   ecp.Ns.data(), ecp.coefficients.data(), ecp.exponents.data(),
+                   ECPShellParams{}, top.ptr()));
     ecp_top_shell_handles_.push_back(std::move(top));
 
     size_t offset = ecp.num_primitives[0];
     for (size_t k = 1; k < ecp.shell_types.size(); k++) {
       ECPShellHandle sh;
-      CUEST_CHECK(cuestECPShellCreate(
-          static_cast<cuestHandle_t>(ctx_),
-          ecp.shell_types[k], ecp.num_primitives[k],
-          &ecp.Ns[offset], &ecp.coefficients[offset], &ecp.exponents[offset],
-          ECPShellParams{}, sh.ptr()));
+      CUEST_NVTX("cuestECPShellCreate",
+                 cuestECPShellCreate(
+                     static_cast<cuestHandle_t>(ctx_),
+                     ecp.shell_types[k], ecp.num_primitives[k],
+                     &ecp.Ns[offset], &ecp.coefficients[offset], &ecp.exponents[offset],
+                     ECPShellParams{}, sh.ptr()));
       ecp_shell_handles_.push_back(std::move(sh));
       offset += ecp.num_primitives[k];
     }
@@ -86,11 +89,12 @@ void ECPBuilder::build_from_json(const std::string& json_path) {
       sh_raw[k] = ecp_shell_handles_[shell_head + k].get();
 
     ECPAtomHandle atom;
-    CUEST_CHECK(cuestECPAtomCreate(
-        static_cast<cuestHandle_t>(ctx_),
-        ecp.n_elec, num_shells, sh_raw.data(),
-        ecp_top_shell_handles_[top_head].get(),
-        ECPAtomParams{}, atom.ptr()));
+    CUEST_NVTX("cuestECPAtomCreate",
+               cuestECPAtomCreate(
+                   static_cast<cuestHandle_t>(ctx_),
+                   ecp.n_elec, num_shells, sh_raw.data(),
+                   ecp_top_shell_handles_[top_head].get(),
+                   ECPAtomParams{}, atom.ptr()));
     ecp_atom_handles_.push_back(std::move(atom));
   }
 
@@ -117,10 +121,11 @@ OwnedECPIntPlan ECPBuilder::create_ecp_int_plan(cuestAOBasis_t basis,
 
   owned.persist = Workspace(pers_desc);
   Workspace temp_ws(temp_desc);
-  CUEST_CHECK(cuestECPIntPlanCreate(
-      static_cast<cuestHandle_t>(ctx_), basis, xyz_host,
-      num_active_ecp_, ecp_indices_.data(), ecp_atoms_raw_.data(),
-      ecp_params, owned.persist.ptr(), temp_ws.ptr(), owned.plan.ptr()));
+  CUEST_NVTX("cuestECPIntPlanCreate",
+             cuestECPIntPlanCreate(
+                 static_cast<cuestHandle_t>(ctx_), basis, xyz_host,
+                 num_active_ecp_, ecp_indices_.data(), ecp_atoms_raw_.data(),
+                 ecp_params, owned.persist.ptr(), temp_ws.ptr(), owned.plan.ptr()));
   return owned;
 }
 

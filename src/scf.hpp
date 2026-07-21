@@ -10,10 +10,10 @@
 #include <iostream>
 #include <numeric>
 #include <vector>
-#include "basis.hpp"
-#include "context.hpp"
-#include "integrals.hpp"
-#include "raii.hpp"
+#include "cuest_wrapper/basis.hpp"
+#include "cuest_wrapper/context.hpp"
+#include "cuest_wrapper/integrals.hpp"
+#include "cuest_wrapper/raii.hpp"
 
 namespace cuest {
 
@@ -92,9 +92,9 @@ class SCFSolver {
   void build_core_hamiltonian();
   void build_fock_rks();
   void build_fock_uks();
-  void diagonalize_fock(DeviceArray& d_Fock, DeviceArray& d_C,
+  void diagonalize_fock(DeviceArray<double>& d_Fock, DeviceArray<double>& d_C,
                         std::vector<double>& mo_energies);
-  void build_density(DeviceArray& d_C, uint64_t nocc, DeviceArray& d_D);
+  void build_density(DeviceArray<double>& d_C, uint64_t nocc, DeviceArray<double>& d_D);
   void form_total_density();
   void initial_guess();
   void break_beta_symmetry();
@@ -105,7 +105,7 @@ class SCFSolver {
                         std::vector<std::vector<double>>& focks,
                         const std::vector<double>& F_host,
                         const std::vector<double>& D_host,
-                        DeviceArray& d_Fock);
+                        DeviceArray<double>& d_Fock);
 
   CuESTContext& ctx_;
   BasisBuilder& basis_;
@@ -129,13 +129,13 @@ class SCFSolver {
   int iter_{0};
   bool converged_{false};
 
-  DeviceArray d_Hcore_, d_S_, d_T_, d_V_, d_ECP_;
-  DeviceArray d_Fock_a_, d_Fock_b_;
-  DeviceArray d_D_a_, d_D_b_, d_D_tot_, d_D_old_a_, d_D_old_b_;
-  DeviceArray d_C_a_, d_C_b_;
-  DeviceArray d_J_, d_K_a_, d_K_b_, d_Vxc_a_, d_Vxc_b_;
-  DeviceArray d_eigvals_, d_xyz_, d_charges_;
-  DeviceArray d_Fwork_, d_Swork_;
+  DeviceArray<double> d_Hcore_, d_S_, d_T_, d_V_, d_ECP_;
+  DeviceArray<double> d_Fock_a_, d_Fock_b_;
+  DeviceArray<double> d_D_a_, d_D_b_, d_D_tot_, d_D_old_a_, d_D_old_b_;
+  DeviceArray<double> d_C_a_, d_C_b_;
+  DeviceArray<double> d_J_, d_K_a_, d_K_b_, d_Vxc_a_, d_Vxc_b_;
+  DeviceArray<double> d_eigvals_, d_xyz_, d_charges_;
+  DeviceArray<double> d_Fwork_, d_Swork_;
 };
 
 }  // namespace cuest

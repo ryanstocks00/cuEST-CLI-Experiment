@@ -1,7 +1,8 @@
 /**
- * @file scf.cpp — RKS / UKS SCF with DIIS (cuSOLVER dsygvd).
+ * @file scf.cpp — RKS / UKS SCF with DIIS (cuSOLVER dsygvd). Application layer.
  */
-#include "cuest_wrapper/scf.hpp"
+#include "scf.hpp"
+#include "cuest_wrapper/nvtx.hpp"
 #include <cmath>
 #include <cstring>
 #include <iomanip>
@@ -23,7 +24,7 @@ SCFSolver::SCFSolver(CuESTContext& ctx, BasisBuilder& basis,
   if (cusolverDnCreate(&cusolver_) != CUSOLVER_STATUS_SUCCESS)
     throw std::runtime_error("cusolverDnCreate failed");
 
-  nao_ = ctx_.query_nao(basis_.basis());
+  nao_ = ctx_.query_nao(basis_.basis_handle());
   nelec_ = mol_.nelec();
   if (nelec_ < 0)
     throw std::runtime_error("Negative electron count after charge/ECP");
@@ -113,7 +114,7 @@ void SCFSolver::build_core_hamiltonian() {
     std::cout << "Computing one-electron integrals...\n";
 }
 
-void SCFSolver::build_density(DeviceArray& d_C, uint64_t nocc, DeviceArray& d_D) {
+void SCFSolver::build_density(DeviceArray<double>& d_C, uint64_t nocc, DeviceArray<double>& d_D) {
   int N = static_cast<int>(nao_);
   int Nocc = static_cast<int>(nocc);
   double one = 1.0, zero = 0.0;
@@ -147,7 +148,7 @@ void SCFSolver::build_fock_rks() {
   cublasDcopy(cublas_, nao_*nao_, d_Hcore_, 1, d_Fock_a_, 1);
   cublasDaxpy(cublas_, nao_*nao_, &two, d_J_, 1, d_Fock_a_, 1);
 
-  DeviceArray d_Cocc;
+  DeviceArray<double> d_Cocc;
   d_Cocc.alloc(nao_ * nocc_ * sizeof(double));
   CUDA_CHECK(cudaMemcpy(d_Cocc, d_C_a_, nao_ * nocc_ * sizeof(double),
                         cudaMemcpyDeviceToDevice));
@@ -188,7 +189,7 @@ void SCFSolver::build_fock_uks() {
   cublasDaxpy(cublas_, nao_*nao_, &one, d_J_, 1, d_Fock_a_, 1);
   cublasDaxpy(cublas_, nao_*nao_, &one, d_J_, 1, d_Fock_b_, 1);
 
-  DeviceArray d_Cocc_a, d_Cocc_b;
+  DeviceArray<double> d_Cocc_a, d_Cocc_b;
   // cuEST UKS requires nocc > 0 for both channels; pad empty spin with zeros.
   uint64_t nocc_a_pad = std::max<uint64_t>(nocc_a_, 1);
   uint64_t nocc_b_pad = std::max<uint64_t>(nocc_b_, 1);
@@ -231,7 +232,7 @@ void SCFSolver::build_fock_uks() {
   }
 }
 
-void SCFSolver::diagonalize_fock(DeviceArray& d_Fock, DeviceArray& d_C,
+void SCFSolver::diagonalize_fock(DeviceArray<double>& d_Fock, DeviceArray<double>& d_C,
                                  std::vector<double>& mo_energies) {
   int N = static_cast<int>(nao_);
   int lda = N;
@@ -380,7 +381,7 @@ void SCFSolver::diis_extrapolate(std::vector<std::vector<double>>& errs,
                                  std::vector<std::vector<double>>& focks,
                                  const std::vector<double>& F_host,
                                  const std::vector<double>& D_host,
-                                 DeviceArray& d_Fock) {
+                                 DeviceArray<double>& d_Fock) {
   int N = static_cast<int>(nao_);
   std::vector<double> S_host(N*N);
   cudaMemcpy(S_host.data(), d_S_, N*N*sizeof(double), cudaMemcpyDeviceToHost);
@@ -464,6 +465,7 @@ void SCFSolver::diis_extrapolate(std::vector<std::vector<double>>& errs,
 }
 
 void SCFSolver::run() {
+  NvtxRange scf_range("SCFSolver::run");
   if (params_.verbose) {
     std::cout << "\n=== Starting SCF Calculation ("
               << (uks_ ? "UKS" : "RKS") << ") ===\n"
@@ -488,6 +490,7 @@ void SCFSolver::run() {
   double e_prev = 0.0;
 
   for (iter_ = 1; iter_ <= params_.max_iter; iter_++) {
+    NvtxRange iter_range("SCF iteration");
     std::vector<double> Da(N*N), Db(N*N), Da_old(N*N), Db_old(N*N);
     cudaMemcpy(Da.data(), d_D_a_, N*N*sizeof(double), cudaMemcpyDeviceToHost);
     cudaMemcpy(Db.data(), d_D_b_, N*N*sizeof(double), cudaMemcpyDeviceToHost);

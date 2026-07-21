@@ -8,6 +8,7 @@
 
 #include <cstdint>
 
+#include "nvtx.hpp"
 #include "raii.hpp"
 
 namespace cuest {
@@ -17,7 +18,11 @@ class CuESTContext {
   CuESTContext() {
     cuestHandleParameters_t hp = nullptr;
     CUEST_CHECK(cuestParametersCreate(CUEST_HANDLE_PARAMETERS, &hp));
-    cuestStatus_t st = cuestCreate(hp, &handle_);
+    cuestStatus_t st;
+    {
+      NvtxRange range("cuestCreate");
+      st = cuestCreate(hp, &handle_);
+    }
     cuestParametersDestroy(CUEST_HANDLE_PARAMETERS, hp);
     CUEST_CHECK(st);  // check after destroying hp to avoid leak
   }
@@ -43,7 +48,7 @@ class CuESTContext {
   cuestHandle_t get() const { return handle_; }
   operator cuestHandle_t() const { return handle_; }
 
-  // Query helpers
+  // Query helpers — prefer Handle::query when you hold an RAII handle.
   template <typename T, typename AttrT>
   T query(cuestType_t type, void* obj, AttrT attr) const {
     T val{};
@@ -51,7 +56,16 @@ class CuESTContext {
     return val;
   }
 
-  // Query AO basis num_ao
+  template <typename T, typename HandleT, auto DestroyFn, cuestType_t Type,
+            typename AttrT>
+  T query(const Handle<HandleT, DestroyFn, Type>& obj, AttrT attr) const {
+    return obj.template query<T>(handle_, attr);
+  }
+
+  uint64_t query_nao(const AOBasisHandle& basis) const {
+    return basis.query<uint64_t>(handle_, CUEST_AOBASIS_NUM_AO);
+  }
+
   uint64_t query_nao(cuestAOBasis_t basis) const {
     uint64_t nao = 0;
     CUEST_CHECK(cuestQuery(handle_, CUEST_AOBASIS, basis, CUEST_AOBASIS_NUM_AO,

@@ -11,6 +11,7 @@
 #include "context.hpp"
 #include "integrals.hpp"
 #include "molecule.hpp"
+#include "nvtx.hpp"
 #include "raii.hpp"
 
 namespace cuest {
@@ -93,7 +94,7 @@ class GradientComputer {
   // RKS: d_Da_ = D_alpha, d_Wa_ = W_alpha, d_Co_ = Cocc_alpha
   // UKS: d_Da_ = D_tot, d_Wa_ = W_tot; d_Co_/d_Cob_ = padded Cocc α/β;
   //      d_Cconcat_ = [Cocc_a | Cocc_b] for DF hybrid exchange.
-  DeviceArray d_Da_, d_Wa_, d_Co_, d_Cob_, d_Cconcat_;
+  DeviceArray<double> d_Da_, d_Wa_, d_Co_, d_Cob_, d_Cconcat_;
   std::vector<double> ov_, ke_, po_, pc_, df_, nu_, xc_, ecp_;
 };
 
@@ -178,7 +179,11 @@ void run_derivative(cuestWorkspaceDescriptor_t& var_buf,
   }
   Workspace temp_ws(td);
   CUDA_CHECK(cudaDeviceSynchronize());
-  cuestStatus_t st = compute(&var_buf, temp_ws.ptr());
+  cuestStatus_t st;
+  {
+    NvtxRange range(label);
+    st = compute(&var_buf, temp_ws.ptr());
+  }
   CUDA_CHECK(cudaDeviceSynchronize());
   cuestParametersDestroy(ptype, params);
   if (st != CUEST_STATUS_SUCCESS)
@@ -195,13 +200,13 @@ inline std::vector<double> GradientComputer::compute() {
   const OwnedAOPairList& pl = basis_.pair_list();
   OneElectronIntegrals oe(ctx_, basis_.basis(), pl.get());
   auto xh = mol_.xyz_host(), ch = mol_.charges_host();
-  DeviceArray dx(3 * natom_ * sizeof(double)), dq(natom_ * sizeof(double));
+  DeviceArray<double> dx(3 * natom_ * sizeof(double)), dq(natom_ * sizeof(double));
   CUDA_CHECK(cudaMemcpy(dx, xh.data(), 3 * natom_ * sizeof(double), cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(dq, ch.data(), natom_ * sizeof(double), cudaMemcpyHostToDevice));
 
-  DeviceArray d_ov(n3 * sizeof(double)), d_ke(n3 * sizeof(double));
-  DeviceArray d_po(n3 * sizeof(double)), d_p2(n3 * sizeof(double));
-  DeviceArray d_df(n3 * sizeof(double)), d_xc(n3 * sizeof(double));
+  DeviceArray<double> d_ov(n3 * sizeof(double)), d_ke(n3 * sizeof(double));
+  DeviceArray<double> d_po(n3 * sizeof(double)), d_p2(n3 * sizeof(double));
+  DeviceArray<double> d_df(n3 * sizeof(double)), d_xc(n3 * sizeof(double));
 
   cuestWorkspaceDescriptor_t var_buf{};
   var_buf.deviceBufferSizeInBytes = kDefaultVariableBufBytes;
@@ -245,7 +250,7 @@ inline std::vector<double> GradientComputer::compute() {
   }
 
   if (ecp_int_) {
-    DeviceArray d_ecp(n3 * sizeof(double));
+    DeviceArray<double> d_ecp(n3 * sizeof(double));
     cuestECPDerivativeComputeParameters_t p;
     CUEST_CHECK(cuestParametersCreate(CUEST_ECPDERIVATIVECOMPUTE_PARAMETERS, &p));
     run_derivative(var_buf, p, CUEST_ECPDERIVATIVECOMPUTE_PARAMETERS,

@@ -1,8 +1,10 @@
 #pragma once
 /**
  * @file basis.hpp
- * @brief Basis set builder - creates cuEST AO shells, AO basis, and pair lists
- *        from BSE JSON data.
+ * @brief RAII ownership for cuEST AO shells, bases, pair lists, and ECP atoms.
+ *
+ * Construction from BSE JSON (`build_from_json`) is implemented in the
+ * application (`src/basis_from_json.cpp`, `src/basis_ecp_from_json.cpp`).
  */
 
 #include <cuda_runtime.h>
@@ -16,7 +18,6 @@
 
 #include "context.hpp"
 #include "molecule.hpp"
-#include "parsers.hpp"
 #include "raii.hpp"
 #include "shell_norm.hpp"
 
