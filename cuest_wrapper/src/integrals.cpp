@@ -154,6 +154,7 @@ void DFJKBuilder::compute_K(uint64_t nocc, const double* d_Cocc, double* d_K,
 // ---------------------------------------------------------------------------
 cuestXCIntPlanParametersFunctional_t XCBuilder::to_cuest_functional(int id) {
   switch (id) {
+    case XC_HF:       return CUEST_XCINTPLAN_PARAMETERS_FUNCTIONAL_HF;
     case XC_PBE:      return CUEST_XCINTPLAN_PARAMETERS_FUNCTIONAL_PBE;
     case XC_B3LYP:    return CUEST_XCINTPLAN_PARAMETERS_FUNCTIONAL_B3LYP1;
     case XC_B3LYP5:   return CUEST_XCINTPLAN_PARAMETERS_FUNCTIONAL_B3LYP5;
@@ -174,7 +175,7 @@ cuestXCIntPlanParametersFunctional_t XCBuilder::to_cuest_functional(int id) {
 XCBuilder::XCBuilder(CuESTContext& ctx, cuestAOBasis_t basis,
                        cuestMolecularGrid_t mol_grid,
                        int functional_id)
-    : ctx_(ctx), mol_grid_(mol_grid) {
+    : ctx_(ctx), mol_grid_(mol_grid), functional_id_(functional_id) {
   cuestWorkspaceDescriptor_t pers_desc{}, temp_desc{};
   XCIntPlanParams xc_params;
 

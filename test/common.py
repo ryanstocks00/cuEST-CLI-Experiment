@@ -33,6 +33,7 @@ ELEMENTS = [
 AM_CHARS = "SPDFGHIKLMNOQR"
 
 PYSCF_XC_MAP = {
+    "HF": "hf",  # used only for name checks; HF uses scf.RHF/UHF below
     "PBE": "pbe,pbe",
     "B3LYP": "b3lyp",
     "B3LYP5": "b3lyp5",
@@ -50,6 +51,7 @@ PYSCF_XC_MAP = {
 
 # Full functional catalog (closed-shell RKS + DF)
 FUNCTIONALS = [
+    "HF",
     "PBE",
     "B3LYP",
     "PBE0",
@@ -60,13 +62,25 @@ FUNCTIONALS = [
     "M06-2X",
 ]
 
-# Default reference / energy-matrix functionals
-REF_FUNCTIONALS = ["PBE", "WB97X"]
+# Default reference / energy-matrix functionals (closed-shell).
+# HF isolates DF J/K (no XC grid); PBE/WB97X exercise grid + hybrids.
+REF_FUNCTIONALS = ["HF", "PBE", "WB97X"]
 SHELL_TYPES = ("spherical", "cartesian")
 
+# Open-shell UKS reference matrix (multiplicity > 1)
+UKS_MOLECULES = [
+    ("oh.xyz", "OH", 2, 1),  # xyz, label, multiplicity, PySCF spin=2S
+]
+UKS_REF_FUNCTIONALS = ["HF", "PBE", "PBE0", "WB97X"]
+# Keep UKS bases moderate (OH is light; full Ahlrichs/Dunning matrix is enough)
+UKS_BASIS_LABELS = [
+    "STO-3G", "6-31G", "6-31G*", "def2SVP", "def2TZVP",
+    "def2SVPD", "cc-pVDZ", "cc-pVTZ",
+]
+
 # Orbital basis → matching DF auxiliary (BSE JSON filenames under data/basis_sets/).
-# Dunning cc-pV*Z: use family RIFIT (BSE has no cc-pvdz-jkfit).
-# Ahlrichs def2 / Pople / STO-3G: def2-universal-jkfit.
+# Prefer JK-fit for hybrids (exact exchange). Dunning: cc-pVTZ/VQZ-jkfit on BSE;
+# no cc-pvdz-jkfit → def2-universal-jkfit. Ahlrichs/Pople/STO → def2-universal-jkfit.
 BASIS_SETS = {
     "STO-3G": {
         "basis": "sto-3g.json",
@@ -96,17 +110,19 @@ BASIS_SETS = {
         "basis": "def2-qzvpp.json",
         "aux": "def2-universal-jkfit.json",
     },
+    # Dunning: prefer JK-fit aux for hybrids (RIFIT is Coulomb-only).
+    # BSE has no cc-pvdz-jkfit → use def2-universal-jkfit.
     "cc-pVDZ": {
         "basis": "cc-pvdz.json",
-        "aux": "cc-pvdz-rifit.json",
+        "aux": "def2-universal-jkfit.json",
     },
     "cc-pVTZ": {
         "basis": "cc-pvtz.json",
-        "aux": "cc-pvtz-rifit.json",
+        "aux": "cc-pvtz-jkfit.json",
     },
     "cc-pVQZ": {
         "basis": "cc-pvqz.json",
-        "aux": "cc-pvqz-rifit.json",
+        "aux": "cc-pvqz-jkfit.json",
     },
 }
 BASIS_JSON = {k: v["basis"] for k, v in BASIS_SETS.items()}
@@ -150,12 +166,34 @@ def aux_json_from_label(aux_basis_label: str) -> str:
     return name
 
 
+def _basis_has_elements(basis_path: Path, symbols: set[str]) -> bool:
+    """True if BSE JSON contains electron_shells for every element symbol."""
+    try:
+        with open(basis_path) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return False
+    elements = data.get("elements", {})
+    for sym in symbols:
+        z = ELEMENTS.index(sym.upper()) if sym.upper() in ELEMENTS else -1
+        if z < 0 or str(z) not in elements:
+            return False
+        if not elements[str(z)].get("electron_shells"):
+            return False
+    return True
+
+
 def build_energy_matrix(quick=False):
     """Energy / gradient validation matrix.
 
-    Default: all molecules × REF_FUNCTIONALS (PBE, WB97X) × all BASIS_SETS
-    × spherical and Cartesian.
+    Default: closed-shell molecules × REF_FUNCTIONALS (HF, PBE, WB97X)
+    × all BASIS_SETS × spherical/cartesian, plus UKS (OH) × UKS_REF_FUNCTIONALS
+    × UKS_BASIS_LABELS.
     --quick: H2O × PBE × def2-SVP × spherical only.
+
+    Skips molecule/basis pairs where the orbital or aux JSON lacks required
+    elements. Also skips all-electron STO-3G for I-containing molecules
+    (pathological heavy-atom / minimal-basis combination).
     """
     matrix = []
     if quick:
@@ -163,25 +201,37 @@ def build_energy_matrix(quick=False):
         funcs = ["PBE"]
         bases = {"def2SVP": BASIS_SETS["def2SVP"]}
         shells = ("spherical",)
+        uks_mols = []
+        uks_funcs = []
+        uks_bases = {}
     else:
         mols = MOLECULES
         funcs = list(REF_FUNCTIONALS)
         bases = BASIS_SETS
         shells = SHELL_TYPES
+        uks_mols = list(UKS_MOLECULES)
+        uks_funcs = list(UKS_REF_FUNCTIONALS)
+        uks_bases = {k: BASIS_SETS[k] for k in UKS_BASIS_LABELS if k in BASIS_SETS}
 
-    for xyz_file, label in mols:
+    def _append_configs(xyz_file, label, funcs_list, bases_dict, shells_list,
+                        multiplicity=1, spin=0):
         xyz_path = MOLECULES_DIR / xyz_file
         if not xyz_path.exists():
-            continue
-
-        for bs_key, bs in bases.items():
+            return
+        symbols = {a[0].upper() for a in load_xyz(xyz_path)}
+        for bs_key, bs in bases_dict.items():
+            if bs_key == "STO-3G" and symbols & {"I"}:
+                continue
             basis_file = BASIS_DIR / bs["basis"]
             aux_file = BASIS_DIR / bs["aux"]
             if not basis_file.exists() or not aux_file.exists():
                 continue
-
-            for func in funcs:
-                for shell in shells:
+            if not _basis_has_elements(basis_file, symbols):
+                continue
+            if not _basis_has_elements(aux_file, symbols):
+                continue
+            for func in funcs_list:
+                for shell in shells_list:
                     matrix.append({
                         "molecule": label,
                         "xyz": str(xyz_path),
@@ -194,7 +244,17 @@ def build_energy_matrix(quick=False):
                         "density_fitting": True,
                         "aux_basis_label": Path(bs["aux"]).stem,
                         "has_ecp": label in ("Br2", "I2", "CH2I2"),
+                        "multiplicity": multiplicity,
+                        "spin": spin,
+                        "uks": multiplicity != 1 or spin != 0,
                     })
+
+    for xyz_file, label in mols:
+        _append_configs(xyz_file, label, funcs, bases, shells)
+
+    for xyz_file, label, mult, spin in uks_mols:
+        _append_configs(xyz_file, label, uks_funcs, uks_bases, shells,
+                        multiplicity=mult, spin=spin)
 
     return matrix
 
@@ -557,6 +617,8 @@ def run_pyscf_df(atoms, basis_path, aux_path, functional, charge=0, spin=0,
             mol_ecp = ecp_parsed
 
     def _energy_for_atoms(atom_list):
+        from pyscf import scf as pyscf_scf
+
         kwargs = dict(
             atom=atom_list, basis=basis_dict, charge=charge, spin=spin,
             verbose=0, cart=cart,
@@ -564,13 +626,23 @@ def run_pyscf_df(atoms, basis_path, aux_path, functional, charge=0, spin=0,
         if mol_ecp:
             kwargs["ecp"] = mol_ecp
         mol = gto.M(**kwargs)
-        xc = PYSCF_XC_MAP.get(functional, functional.lower())
-        mf = dft.RKS(mol).density_fit()
-        mf.xc = xc
+        # spin = 2S = multiplicity - 1. Nonzero → unrestricted.
+        # Pure HF: no XC grid — isolates DF J/K vs cuEST.
+        if functional.upper() == "HF":
+            mf = (pyscf_scf.RHF(mol) if spin == 0 else pyscf_scf.UHF(mol)).density_fit()
+        elif spin == 0:
+            mf = dft.RKS(mol).density_fit()
+            mf.xc = PYSCF_XC_MAP.get(functional, functional.lower())
+            mf.grids.level = grid_level
+        else:
+            mf = dft.UKS(mol).density_fit()
+            mf.xc = PYSCF_XC_MAP.get(functional, functional.lower())
+            mf.grids.level = grid_level
         mf.max_cycle = 200
         mf.conv_tol = 1e-10
-        mf.grids.level = grid_level
-        mf.init_guess = "1e"
+        # minao/sad: '1e' (Hcore) can converge to false minima for some
+        # heavy-atom + LRC cases (e.g. Br2/WB97X/cartesian).
+        mf.init_guess = "minao"
         _build_spherical_df(mf, aux_dict)
         energy = mf.kernel()
         if not mf.converged or not is_finite(energy):
@@ -584,13 +656,19 @@ def run_pyscf_df(atoms, basis_path, aux_path, functional, charge=0, spin=0,
         return {"ok": False, "error": "PySCF did not converge or non-finite energy / bad aux"}
 
     mol = mf.mol
-    nelec = mol.nelec
-    if isinstance(nelec, (tuple, list)):
-        nelec = nelec[0] + nelec[1]
+    nelec_ab = mol.nelec
+    if isinstance(nelec_ab, (tuple, list)):
+        nalpha, nbeta = int(nelec_ab[0]), int(nelec_ab[1])
+        nelec = nalpha + nbeta
+    else:
+        nelec = int(nelec_ab)
+        nalpha = nbeta = nelec // 2
     nocc = nelec // 2
     scf_iterations = int(getattr(mf, "cycles", 0) or 0)
 
     gradient = None
+    # Analytic DF grads: spherical orbitals only (PySCF has no mixed cart/sph DF grad).
+    # Supported for both RKS (spin=0) and UKS (spin>0).
     if compute_gradient and not cart:
         try:
             g = mf.nuc_grad_method().kernel()
@@ -600,18 +678,32 @@ def run_pyscf_df(atoms, basis_path, aux_path, functional, charge=0, spin=0,
         except Exception as e:
             return {"ok": False, "error": f"gradient failed: {e}", "mf": mf, "mol": mol}
 
+    # HOMO/LUMO: RKS uses mo_energy; UKS uses max occupied / min virtual over spins.
+    if spin == 0:
+        homo = float(mf.mo_energy[nocc - 1])
+        lumo = float(mf.mo_energy[nocc])
+    else:
+        ea, eb = mf.mo_energy
+        occ_e = list(ea[:nalpha]) + list(eb[:nbeta])
+        vir_e = list(ea[nalpha:]) + list(eb[nbeta:])
+        homo = float(max(occ_e)) if occ_e else float("nan")
+        lumo = float(min(vir_e)) if vir_e else float("nan")
+
     return {
         "ok": True,
         "energy": float(energy),
-        "homo": float(mf.mo_energy[nocc - 1]),
-        "lumo": float(mf.mo_energy[nocc]),
+        "homo": homo,
+        "lumo": lumo,
         "nelec": nelec,
+        "nalpha": nalpha,
+        "nbeta": nbeta,
         "nocc": nocc,
         "scf_iterations": scf_iterations,
         "gradient_ha_bohr": gradient,
         "shell": shell,
         "nao": int(mol.nao),
         "naux": int(mf.with_df.auxmol.nao),
+        "uks": spin != 0,
         "mf": mf,
         "mol": mol,
     }

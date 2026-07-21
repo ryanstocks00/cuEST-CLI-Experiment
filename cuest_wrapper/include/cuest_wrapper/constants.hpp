@@ -14,21 +14,21 @@ namespace constants {
 // Length
 // ---------------------------------------------------------------------------
 
-/// Bohr radius in angstrom — matches PySCF value for exact comparison
-constexpr double bohr_per_angstrom = 0.52917721092;
+/// Angstrom per bohr (Bohr radius in angstrom) — matches PySCF for exact comparison
+constexpr double angstrom_per_bohr = 0.52917721092;
 
-/// Angstrom per bohr
-constexpr double angstrom_per_bohr = 1.0 / bohr_per_angstrom;  // ≈ 1.8897259887
+/// Bohr per angstrom
+constexpr double bohr_per_angstrom = 1.0 / angstrom_per_bohr;  // ≈ 1.8897259887
 
 // ---------------------------------------------------------------------------
 // Energy
 // ---------------------------------------------------------------------------
 
-/// Hartree to eV conversion (CODATA 2018)
-constexpr double hartree_per_ev = 27.211386245988;
+/// eV per Hartree (CODATA 2018)
+constexpr double ev_per_hartree = 27.211386245988;
 
-/// eV to Hartree
-constexpr double ev_per_hartree = 1.0 / hartree_per_ev;
+/// Hartree per eV
+constexpr double hartree_per_ev = 1.0 / ev_per_hartree;
 
 }  // namespace constants
 }  // namespace cuest

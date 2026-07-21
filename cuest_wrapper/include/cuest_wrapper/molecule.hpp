@@ -35,7 +35,7 @@ class Molecule {
   // Add atom with coordinates in angstrom (converts to bohr internally)
   void add_atom(const std::string& symbol, double x_ang, double y_ang,
                 double z_ang,
-                double ang_to_bohr = constants::angstrom_per_bohr) {
+                double ang_to_bohr = constants::bohr_per_angstrom) {
     Atom atom;
     atom.symbol = symbol;
     atom.x = x_ang * ang_to_bohr;

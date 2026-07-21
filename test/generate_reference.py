@@ -2,7 +2,8 @@
 """
 Generate PySCF-DF reference energies, SCF iteration counts, and gradients.
 
-Default matrix: all molecules × {PBE, WB97X} × all bases × {spherical, cartesian}.
+Default matrix: closed-shell × {HF, PBE, WB97X} × all bases × {spherical, cartesian},
+plus UKS OH × {HF, PBE, PBE0, WB97X} × UKS bases.
 DF auxiliary bases are always spherical (matching cuEST).
 
 Each reference entry records density_fitting=true and aux_basis_label so
@@ -30,12 +31,42 @@ from common import (  # noqa: E402
 
 REFERENCE_FILE = PROJ_DIR / "test" / "reference.json"
 
+# cuEST cuestDFSymmetricDerivativeCompute throws on hybrids for SP-only
+# orbital bases (STO-3G, 6-31G). Skip storing grads for those refs.
+# Also skip hybrid + 6-31G* for H2 (no D on H ⇒ SP-equivalent, wrong grads)
+# and H2O/HF (library throws CUEST_STATUS_EXCEPTION on DF JK derivative).
+_HYBRID_FUNCS = {
+    "HF",  # 100% exact exchange — same SP-only DF JK derivative failures
+    "B3LYP", "B3LYP5", "PBE0", "CAM-B3LYP", "WB97X", "WB97X-V", "WB97M-V",
+    "HSE06", "M06", "M06-2X", "LC-WPBE", "LC-WPBEH",
+}
+_SP_ONLY_BASES = {"STO-3G", "6-31G"}
+_HYBRID_GRAD_SKIP = {
+    ("H2", "6-31G*"),   # no D on H ⇒ SP-equivalent; wrong grads
+    ("H2O", "6-31G*"),  # DF JK derivative throws
+    ("HF", "6-31G*"),   # DF JK derivative throws
+    ("OH", "6-31G*"),   # DF JK derivative throws (UKS)
+}
+
+
+def want_gradient(config) -> bool:
+    if config.get("shell", "spherical") != "spherical":
+        return False
+    func = config["functional"]
+    basis = config["basis_label"]
+    if func in _HYBRID_FUNCS and basis in _SP_ONLY_BASES:
+        return False
+    if func in _HYBRID_FUNCS and (config["molecule"], basis) in _HYBRID_GRAD_SKIP:
+        return False
+    return True
+
 
 def ref_key(r):
     """Identity for a reference entry.
 
     Includes DF flag + aux label so density-fitted and exact-integral refs
     can coexist for the same molecule/functional/orbital basis/shell.
+    Multiplicity distinguishes RKS vs UKS entries.
     """
     df = bool(r.get("density_fitting", True))
     aux = r.get("aux_basis_label") if df else None
@@ -44,6 +75,7 @@ def ref_key(r):
         r["functional"],
         r["basis_label"],
         r.get("shell", "spherical"),
+        int(r.get("multiplicity", 1)),
         df,
         aux,
     )
@@ -53,11 +85,14 @@ def run_pyscf(config):
     atoms = load_xyz(config["xyz"])
     start = time.time()
     shell = config.get("shell", "spherical")
+    spin = int(config.get("spin", 0))
     r = run_pyscf_df(
         atoms, config["basis"], config["aux_basis"], config["functional"],
+        charge=int(config.get("charge", 0)),
+        spin=spin,
         grid_level=3,
         shell=shell,
-        compute_gradient=(shell == "spherical"),
+        compute_gradient=want_gradient(config),
     )
     elapsed = time.time() - start
     if not r["ok"]:
@@ -143,6 +178,7 @@ def main():
             "functional": config["functional"],
             "basis_label": config["basis_label"],
             "shell": config["shell"],
+            "multiplicity": config.get("multiplicity", 1),
             "density_fitting": df,
             "aux_basis_label": aux_label,
         })
@@ -155,6 +191,8 @@ def main():
                 "functional": config["functional"],
                 "basis_label": config["basis_label"],
                 "shell": config["shell"],
+                "multiplicity": int(config.get("multiplicity", 1)),
+                "uks": bool(config.get("uks", False)),
                 "density_fitting": df,
                 "aux_basis_label": aux_label,
                 "energy_ha": r["energy_ha"],
@@ -174,6 +212,7 @@ def main():
             key=lambda r: (
                 r["molecule"], r["functional"], r["basis_label"],
                 r.get("shell", "spherical"),
+                int(r.get("multiplicity", 1)),
                 not bool(r.get("density_fitting", True)),
                 r.get("aux_basis_label") or "",
             ),

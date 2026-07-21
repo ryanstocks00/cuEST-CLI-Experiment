@@ -18,15 +18,17 @@
 namespace cuest {
 
 struct SCFParams {
-  int max_iter{150};
+  int max_iter{250};
   double conv_thresh{1e-8};
   double energy_conv_thresh{1e-8};
   int diis_start{1};
-  int diis_max_space{10};
+  int diis_max_space{15};
   double damping{0.0};
   bool verbose{true};
   bool print_mos{false};
   int print_level{2};
+  /// Mix angle (radians) for HOMO–LUMO symmetry breaking on the β guess.
+  double break_symmetry{0.3};
 };
 
 class SCFSolver {
@@ -48,36 +50,68 @@ class SCFSolver {
   double coulomb_energy() const { return e_j_; }
   double exchange_energy() const { return e_k_; }
   double tr_ds() const { return tr_ds_; }
-  const std::vector<double>& orbital_energies() const { return mo_energies_; }
+  bool is_uks() const { return uks_; }
+  uint64_t nocc_alpha() const { return nocc_a_; }
+  uint64_t nocc_beta() const { return nocc_b_; }
+  /// RKS: nocc. UKS: nocc_alpha (for gradient APIs that expect one channel).
+  uint64_t nocc() const { return uks_ ? nocc_a_ : nocc_; }
+  const std::vector<double>& orbital_energies() const { return mo_energies_a_; }
+  const std::vector<double>& orbital_energies_beta() const { return mo_energies_b_; }
   std::vector<double> mo_coefficients_host() {
     std::vector<double> C(nao_ * nao_);
-    cudaMemcpy(C.data(), d_C_.get(), nao_*nao_*sizeof(double), cudaMemcpyDeviceToHost);
+    cudaMemcpy(C.data(), d_C_a_.get(), nao_*nao_*sizeof(double), cudaMemcpyDeviceToHost);
     return C;
   }
+  std::vector<double> mo_coefficients_beta_host() {
+    std::vector<double> C(nao_ * nao_);
+    cudaMemcpy(C.data(), d_C_b_.get(), nao_*nao_*sizeof(double), cudaMemcpyDeviceToHost);
+    return C;
+  }
+  /// Spin-α density (RKS: D_alpha; UKS: D_alpha). Gradients use D_alpha convention.
   std::vector<double> density_host() {
     std::vector<double> D(nao_ * nao_);
-    cudaMemcpy(D.data(), d_D_.get(), nao_*nao_*sizeof(double), cudaMemcpyDeviceToHost);
+    cudaMemcpy(D.data(), d_D_a_.get(), nao_*nao_*sizeof(double), cudaMemcpyDeviceToHost);
+    return D;
+  }
+  std::vector<double> density_alpha_host() { return density_host(); }
+  std::vector<double> density_beta_host() {
+    std::vector<double> D(nao_ * nao_);
+    cudaMemcpy(D.data(), d_D_b_.get(), nao_*nao_*sizeof(double), cudaMemcpyDeviceToHost);
+    return D;
+  }
+  std::vector<double> density_total_host() {
+    std::vector<double> D(nao_ * nao_);
+    cudaMemcpy(D.data(), d_D_tot_.get(), nao_*nao_*sizeof(double), cudaMemcpyDeviceToHost);
     return D;
   }
   uint64_t nao() const { return nao_; }
-  uint64_t nocc() const { return nocc_; }
   int n_iter() const { return iter_; }
   bool converged() const { return converged_; }
 
  private:
   void build_core_hamiltonian();
-  void build_fock_matrix(const std::vector<double>& D_host);
-  void diagonalize_fock();  // GPU-based: FC=SCE via cuSOLVER dsygvd
-  void build_density_matrix();
+  void build_fock_rks();
+  void build_fock_uks();
+  void diagonalize_fock(DeviceArray& d_Fock, DeviceArray& d_C,
+                        std::vector<double>& mo_energies);
+  void build_density(DeviceArray& d_C, uint64_t nocc, DeviceArray& d_D);
+  void form_total_density();
+  void initial_guess();
+  void break_beta_symmetry();
   double compute_rms_delta(const std::vector<double>& D_new,
                            const std::vector<double>& D_old);
-  double trace_dot(const double* d_A, const double* d_B, int N); // Tr[A*B] on host
+  double trace_dot(const double* d_A, const double* d_B, int N);
+  void diis_extrapolate(std::vector<std::vector<double>>& errs,
+                        std::vector<std::vector<double>>& focks,
+                        const std::vector<double>& F_host,
+                        const std::vector<double>& D_host,
+                        DeviceArray& d_Fock);
 
   CuESTContext& ctx_;
   BasisBuilder& basis_;
   DFJKBuilder& dfjk_;
   XCBuilder* xc_;
-  ECPBuilder* ecp_builder_;  // retained for API/future use
+  ECPBuilder* ecp_builder_;
   ECPIntegrals* ecp_int_;
   const Molecule& mol_;
   SCFParams params_;
@@ -85,26 +119,23 @@ class SCFSolver {
   cublasHandle_t cublas_{};
   cusolverDnHandle_t cusolver_{};
 
-  uint64_t nao_, nocc_;
-  int nelec_;
+  bool uks_{false};
+  uint64_t nao_{0}, nocc_{0}, nocc_a_{0}, nocc_b_{0};
+  int nelec_{0};
   double e_nuc_{0.0}, e_elec_{0.0}, e_xc_{0.0}, e_total_{0.0};
-  // Last-iteration energy components (D = D_alpha convention)
-  double e_hcore_{0.0};  // 2*Tr[D*Hcore]
-  double e_kin_{0.0};    // 2*Tr[D*T]
-  double e_ne_{0.0};     // 2*Tr[D*V]
-  double e_j_{0.0};      // 2*Tr[D*J]
-  double e_k_{0.0};      // exchange energy contribution (0 for pure functionals)
+  double e_hcore_{0.0}, e_kin_{0.0}, e_ne_{0.0}, e_j_{0.0}, e_k_{0.0};
   double tr_ds_{0.0};
-  std::vector<double> mo_energies_;
+  std::vector<double> mo_energies_a_, mo_energies_b_;
   int iter_{0};
   bool converged_{false};
 
-  // GPU matrices
   DeviceArray d_Hcore_, d_S_, d_T_, d_V_, d_ECP_;
-  DeviceArray d_Fock_, d_D_, d_D_old_, d_C_;
-  DeviceArray d_J_, d_K_, d_Vxc_;
+  DeviceArray d_Fock_a_, d_Fock_b_;
+  DeviceArray d_D_a_, d_D_b_, d_D_tot_, d_D_old_a_, d_D_old_b_;
+  DeviceArray d_C_a_, d_C_b_;
+  DeviceArray d_J_, d_K_a_, d_K_b_, d_Vxc_a_, d_Vxc_b_;
   DeviceArray d_eigvals_, d_xyz_, d_charges_;
-  DeviceArray d_Fwork_, d_Swork_;  // workspaces
+  DeviceArray d_Fwork_, d_Swork_;
 };
 
 }  // namespace cuest

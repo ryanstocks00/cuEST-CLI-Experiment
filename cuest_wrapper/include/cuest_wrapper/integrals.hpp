@@ -78,7 +78,8 @@ class XCBuilder {
  public:
   // Supported functionals -- mirrored from cuEST parameter types
   enum Functional {
-    XC_PBE = 0,             // CUEST_XCINTPLAN_PARAMETERS_FUNCTIONAL_PBE
+    XC_HF = 0,              // CUEST_XCINTPLAN_PARAMETERS_FUNCTIONAL_HF (no grid XC)
+    XC_PBE,                 // CUEST_XCINTPLAN_PARAMETERS_FUNCTIONAL_PBE
     XC_B3LYP,               // CUEST_XCINTPLAN_PARAMETERS_FUNCTIONAL_B3LYP
     XC_B3LYP5,              // etc.
     XC_PBE0,
@@ -114,6 +115,7 @@ class XCBuilder {
   // Query if functional is hybrid (has exact exchange)
   bool is_hybrid();
   bool is_lrc();            // has long-range correction
+  bool is_hf() const { return functional_id_ == XC_HF; }
   double exchange_scale();  // fraction of HF exchange for hybrids
 
  private:
@@ -124,6 +126,7 @@ class XCBuilder {
   // persist outlives plan (destroyed last)
   Workspace xc_persist_ws_;
   XCIntPlanHandle plan_;
+  int functional_id_{-1};
 };
 
 // ---------------------------------------------------------------------------

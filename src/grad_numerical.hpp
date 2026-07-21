@@ -55,7 +55,7 @@ inline std::vector<double> numerical_gradient(
 {
   size_t natom = mol.natom();
   double delta = 0.005; // Angstrom
-  double delta_bohr = delta * constants::angstrom_per_bohr;
+  double delta_bohr = delta * constants::bohr_per_angstrom;
   std::vector<double> forces(natom*3, 0.0);
 
   const char* func_name = functional_id_to_name(func_id);
@@ -70,9 +70,9 @@ inline std::vector<double> numerical_gradient(
         if (!f) continue;
         fprintf(f, "%zu\nnumerical gradient displacement\n", natom);
         for (size_t i = 0; i < natom; i++) {
-          double x = mol.atom(i).x * constants::bohr_per_angstrom;
-          double y = mol.atom(i).y * constants::bohr_per_angstrom;
-          double z = mol.atom(i).z * constants::bohr_per_angstrom;
+          double x = mol.atom(i).x * constants::angstrom_per_bohr;
+          double y = mol.atom(i).y * constants::angstrom_per_bohr;
+          double z = mol.atom(i).z * constants::angstrom_per_bohr;
           if (i == a) {
             if (xyz == 0) x += sgn * delta;
             if (xyz == 1) y += sgn * delta;

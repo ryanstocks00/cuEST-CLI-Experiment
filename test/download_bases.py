@@ -25,8 +25,10 @@ DOWNLOADS = [
     ("cc-pvdz", "cc-pvdz.json"),
     ("cc-pvtz", "cc-pvtz.json"),
     ("cc-pvqz", "cc-pvqz.json"),
-    # Auxiliaries
+    # Auxiliaries (JK-fit preferred for hybrids; RIFIT kept for optional use)
     ("def2-universal-jkfit", "def2-universal-jkfit.json"),
+    ("cc-pvtz-jkfit", "cc-pvtz-jkfit.json"),
+    ("cc-pvqz-jkfit", "cc-pvqz-jkfit.json"),
     ("cc-pvdz-rifit", "cc-pvdz-rifit.json"),
     ("cc-pvtz-rifit", "cc-pvtz-rifit.json"),
     ("cc-pvqz-rifit", "cc-pvqz-rifit.json"),

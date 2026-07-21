@@ -53,7 +53,7 @@ struct XYZData {
 // XYZ file parser
 // ---------------------------------------------------------------------------
 inline XYZData parse_xyz(const std::string& filepath,
-                          double ang_to_bohr = constants::angstrom_per_bohr) {
+                          double ang_to_bohr = constants::bohr_per_angstrom) {
   std::ifstream fin(filepath);
   if (!fin) throw std::runtime_error("Cannot open XYZ file: " + filepath);
 

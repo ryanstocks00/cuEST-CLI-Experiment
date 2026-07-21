@@ -54,7 +54,8 @@ Orbital ↔ auxiliary pairings used by the validators (`test/common.py`):
 |---------|-----------|
 | STO-3G, 6-31G, 6-31G* | def2-universal-jkfit |
 | def2-SVP / TZVP / SVPD / QZVPP | def2-universal-jkfit |
-| cc-pVDZ / VTZ / VQZ | matching `cc-pV*Z-rifit` |
+| cc-pVDZ | def2-universal-jkfit (no cc-pvdz-jkfit on BSE) |
+| cc-pVTZ / VQZ | matching `cc-pV*Z-jkfit` |
 
 Default `test/reference.json` matrix: all molecules × {PBE, WB97X} × all
 bases × {spherical, Cartesian} orbitals, with SCF iteration counts.
@@ -94,7 +95,8 @@ Optional arguments:
   --radial-pts <n>         Radial grid points (default: 75)
   --angular-pts <n>        Angular Lebedev points (default: 302)
   --charge <int>           Total charge (default: 0)
-  --multiplicity <int>     Spin multiplicity (default: 1; RKS requires 1)
+  --multiplicity <int>     Spin multiplicity (default: 1; UKS if ≠ 1)
+  --break-symmetry <rad>   UKS β HOMO/LUMO mix angle (default: 0.3)
 
 SCF convergence options:
   --max-iter <n>           Max SCF iterations (default: 150)
@@ -112,11 +114,22 @@ Other options:
   --help                   Show this help
 
 Notes:
-  Density fitting is required. Only closed-shell RKS (even electron count,
-  multiplicity 1) is supported. ECP data is auto-detected from the JSON basis.
+  Density fitting is required. Closed-shell RKS (multiplicity 1) and
+  unrestricted UKS (multiplicity > 1) are supported. For broken-symmetry
+  singlets (nα = nβ), `--break-symmetry` mixes the β HOMO/LUMO on the
+  initial guess; ordinary open-shell (nα ≠ nβ) skips that mix. Analytic
+  gradients are available for both RKS and UKS (spherical orbitals).
+  ECP data is auto-detected from the JSON basis.
+
+Known-bad hybrid DF analytic gradients (cuEST library limitation — energy
+still computed; refs skip storing grads for these):
+  - All hybrids × {STO-3G, 6-31G} (SP-only orbital bases): DF JK derivative
+    throws `CUEST_STATUS_EXCEPTION`.
+  - Hybrid × 6-31G* for H2 (no D on H ⇒ SP-equivalent; wrong grads).
+  - Hybrid × 6-31G* for H2O, HF, OH: DF JK derivative throws.
 
 Available functionals:
-  PBE B3LYP B3LYP5 PBE0 CAM-B3LYP WB97X-V WB97M-V
+  HF PBE B3LYP B3LYP5 PBE0 CAM-B3LYP WB97X-V WB97M-V
   HSE06 M06 M06-2X LC-WPBE LC-WPBEH WB97X
 ```
 
@@ -126,6 +139,28 @@ Available functionals:
 
 ```bash
 python3 test/validate_cuest.py --functional PBE
+```
+
+### Density-fitted Hartree–Fock (no XC grid)
+
+DF-HF isolates J/K / aux-basis error from XC quadrature. Use `--compare-dft`
+to print |ΔE| summaries for HF vs PBE vs WB97X on the same cells:
+
+```bash
+python3 test/validate_hf.py --quick --compare-dft
+python3 test/validate_hf.py
+```
+
+### Unrestricted UKS (open-shell)
+
+```bash
+python3 test/validate_uks.py            # full OH energy+grad sweep
+python3 test/validate_uks.py --quick    # def2SVP smoke
+# OH radical example:
+./build/cuest_dft --xyz data/molecules/oh.xyz \
+  --basis data/basis_sets/def2-svp.json \
+  --aux-basis data/basis_sets/def2-universal-jkfit.json \
+  --functional PBE --multiplicity 2 --analytic-gradient
 ```
 
 ### Gradients
