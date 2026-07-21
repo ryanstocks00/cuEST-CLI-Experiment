@@ -1,8 +1,12 @@
 # Build
 build/
+CMakeFiles/
 *.o
 *.so
 *.a
+
+# Nsight Systems traces / exports
+profiles/
 
 # Local cuEST install (not vendored in git)
 external/libcuest*

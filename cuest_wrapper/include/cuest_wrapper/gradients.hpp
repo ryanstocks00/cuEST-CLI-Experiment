@@ -70,7 +70,8 @@ class GradientComputer {
                    uint64_t nocc,
                    const std::vector<double>& eps, const std::vector<double>& C,
                    const std::vector<double>& D_alpha,
-                   const std::vector<int>* ecp_core = nullptr);
+                   const std::vector<int>* ecp_core = nullptr,
+                   bool use_jit = true);
 
   /// UKS: α/β channels. One-electron terms use D_tot / W_tot (no ×2).
   GradientComputer(CuESTContext& ctx, BasisBuilder& basis, DFJKBuilder& dfjk,
@@ -79,7 +80,8 @@ class GradientComputer {
                    const std::vector<double>& eps_a, const std::vector<double>& eps_b,
                    const std::vector<double>& C_a, const std::vector<double>& C_b,
                    const std::vector<double>& D_a, const std::vector<double>& D_b,
-                   const std::vector<int>* ecp_core = nullptr);
+                   const std::vector<int>* ecp_core = nullptr,
+                   bool use_jit = true);
 
   std::vector<double> compute();
   bool is_uks() const { return uks_; }
@@ -96,6 +98,7 @@ class GradientComputer {
   CuESTContext& ctx_; BasisBuilder& basis_; DFJKBuilder& dfjk_;
   XCBuilder* xc_builder_; ECPIntegrals* ecp_int_; const Molecule& mol_;
   const std::vector<int>* ecp_core_{nullptr};
+  bool use_jit_{true};
   bool uks_{false};
   uint64_t nao_, nocc_, nocc_a_, nocc_b_, natom_;
   // RKS: d_Da_ = D_alpha, d_Wa_ = W_alpha, d_Co_ = Cocc_alpha
@@ -111,9 +114,10 @@ inline GradientComputer::GradientComputer(
     uint64_t nocc,
     const std::vector<double>& eps, const std::vector<double>& C,
     const std::vector<double>& D_alpha,
-    const std::vector<int>* ecp_core)
+    const std::vector<int>* ecp_core,
+    bool use_jit)
   : ctx_(ctx), basis_(basis), dfjk_(dfjk), xc_builder_(xc_builder), ecp_int_(ecp_int), mol_(mol),
-    ecp_core_(ecp_core),
+    ecp_core_(ecp_core), use_jit_(use_jit),
     uks_(false), nao_(basis.nao()), nocc_(nocc), nocc_a_(nocc), nocc_b_(nocc), natom_(mol.natom()) {
   d_Da_.alloc(nao_ * nao_ * sizeof(double));
   CUDA_CHECK(cudaMemcpy(d_Da_, D_alpha.data(), nao_ * nao_ * sizeof(double), cudaMemcpyHostToDevice));
@@ -132,9 +136,10 @@ inline GradientComputer::GradientComputer(
     const std::vector<double>& eps_a, const std::vector<double>& eps_b,
     const std::vector<double>& C_a, const std::vector<double>& C_b,
     const std::vector<double>& D_a, const std::vector<double>& D_b,
-    const std::vector<int>* ecp_core)
+    const std::vector<int>* ecp_core,
+    bool use_jit)
   : ctx_(ctx), basis_(basis), dfjk_(dfjk), xc_builder_(xc_builder), ecp_int_(ecp_int), mol_(mol),
-    ecp_core_(ecp_core),
+    ecp_core_(ecp_core), use_jit_(use_jit),
     uks_(true), nao_(basis.nao()), nocc_(nocc_a), nocc_a_(nocc_a), nocc_b_(nocc_b),
     natom_(mol.natom()) {
   // One-electron / overlap: total density and total energy-weighted density.
@@ -209,7 +214,7 @@ inline std::vector<double> GradientComputer::compute() {
   nu_ = ecp_core_ ? nuc_grad(mol_, *ecp_core_) : nuc_grad(mol_);
 
   const OwnedAOPairList& pl = basis_.pair_list();
-  OneElectronIntegrals oe(ctx_, basis_.basis(), pl.get());
+  OneElectronIntegrals oe(ctx_, basis_.basis(), pl.get(), use_jit_);
   auto xh = mol_.xyz_host();
   auto ch = ecp_core_ ? mol_.charges_host(*ecp_core_) : mol_.charges_host();
   DeviceArray<double> dx(3 * natom_ * sizeof(double)), dq(natom_ * sizeof(double));
@@ -252,6 +257,14 @@ inline std::vector<double> GradientComputer::compute() {
   {
     cuestPotentialDerivativeComputeParameters_t p;
     CUEST_CHECK(cuestParametersCreate(CUEST_POTENTIALDERIVATIVECOMPUTE_PARAMETERS, &p));
+    if (!use_jit_) {
+      cuestJITUsageMode_t jit = CUEST_JIT_USAGE_MODE_OFF;
+      cuestFfloatUsageMode_t ffloat = CUEST_FFLOAT_USAGE_MODE_OFF;
+      cuestParametersConfigure(CUEST_POTENTIALDERIVATIVECOMPUTE_PARAMETERS, p,
+          CUEST_POTENTIALDERIVATIVECOMPUTE_PARAMETERS_JIT_USAGE_MODE, &jit, sizeof(jit));
+      cuestParametersConfigure(CUEST_POTENTIALDERIVATIVECOMPUTE_PARAMETERS, p,
+          CUEST_POTENTIALDERIVATIVECOMPUTE_PARAMETERS_FFLOAT_USAGE_MODE, &ffloat, sizeof(ffloat));
+    }
     run_derivative(var_buf, p, CUEST_POTENTIALDERIVATIVECOMPUTE_PARAMETERS,
       [&](auto* /*vb*/, auto* td) {
         return cuestPotentialDerivativeComputeWorkspaceQuery(ctx_, oe.plan(), p, td, natom_, dx, dq, d_Da_, nullptr, nullptr);
@@ -312,6 +325,14 @@ inline std::vector<double> GradientComputer::compute() {
           CUEST_DFSYMMETRICDERIVATIVECOMPUTE_PARAMETERS, p,
           CUEST_DFSYMMETRICDERIVATIVECOMPUTE_PARAMETERS_MEMORY_POLICY,
           &pol, sizeof(pol)));
+    }
+    if (!use_jit_) {
+      cuestJITUsageMode_t jit = CUEST_JIT_USAGE_MODE_OFF;
+      cuestFfloatUsageMode_t ffloat = CUEST_FFLOAT_USAGE_MODE_OFF;
+      cuestParametersConfigure(CUEST_DFSYMMETRICDERIVATIVECOMPUTE_PARAMETERS, p,
+          CUEST_DFSYMMETRICDERIVATIVECOMPUTE_PARAMETERS_JIT_USAGE_MODE, &jit, sizeof(jit));
+      cuestParametersConfigure(CUEST_DFSYMMETRICDERIVATIVECOMPUTE_PARAMETERS, p,
+          CUEST_DFSYMMETRICDERIVATIVECOMPUTE_PARAMETERS_FFLOAT_USAGE_MODE, &ffloat, sizeof(ffloat));
     }
     run_derivative(var_buf, p, CUEST_DFSYMMETRICDERIVATIVECOMPUTE_PARAMETERS,
       [&](auto* vb, auto* td) {

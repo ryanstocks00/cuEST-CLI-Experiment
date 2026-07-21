@@ -24,7 +24,7 @@ class CuESTContext;
 class OneElectronIntegrals {
  public:
   OneElectronIntegrals(CuESTContext& ctx, cuestAOBasis_t basis,
-                        cuestAOPairList_t pair_list);
+                        cuestAOPairList_t pair_list, bool use_jit = true);
 
   void compute_overlap(double* d_S);  // d_S[nao*nao] device memory
   void compute_kinetic(double* d_T);
@@ -34,6 +34,7 @@ class OneElectronIntegrals {
 
  private:
   CuESTContext& ctx_;
+  bool use_jit_{true};
   cuestWorkspaceDescriptor_t persistent_desc_{};
   Workspace persistent_ws_;  // outlives plan_
   OEIntPlanHandle plan_;
@@ -50,7 +51,8 @@ class DFJKBuilder {
   DFJKBuilder(CuESTContext& ctx, cuestAOBasis_t primary_basis,
                cuestAOBasis_t aux_basis,
                const double* xyz_host, uint64_t natom,
-               double exchange_frac=0.0, double lrc_frac=0.0, double lrc_omega=0.0);
+               double exchange_frac=0.0, double lrc_frac=0.0, double lrc_omega=0.0,
+               bool use_jit=true);
 
   // Compute Coulomb matrix J from density matrix D
   void compute_J(const double* d_D, double* d_J);
@@ -59,11 +61,15 @@ class DFJKBuilder {
   void compute_K(uint64_t nocc, const double* d_Cocc, double* d_K,
                  size_t variable_buf_bytes = kDefaultVariableBufBytes);
 
+  void set_use_jit(bool use_jit) { use_jit_ = use_jit; }
+  [[nodiscard]] bool use_jit() const { return use_jit_; }
+
   ~DFJKBuilder();
   [[nodiscard]] cuestDFIntPlan_t plan() const { return plan_.get(); }
 
  private:
   CuESTContext& ctx_;
+  bool use_jit_{true};
   // Persist buffers outlive the handles that use them (destroyed last).
   Workspace pair_list_persist_;
   Workspace plan_persist_;

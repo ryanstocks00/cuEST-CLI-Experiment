@@ -103,7 +103,7 @@ double SCFSolver::trace_dot(const double* d_A, const double* d_B, int N) {
 
 void SCFSolver::build_core_hamiltonian() {
   const OwnedAOPairList& pair_list = basis_.pair_list();
-  OneElectronIntegrals oe(ctx_, basis_.basis(), pair_list.get());
+  OneElectronIntegrals oe(ctx_, basis_.basis(), pair_list.get(), params_.use_jit);
   oe.compute_kinetic(d_T_);
   oe.compute_potential(d_V_, mol_.natom(), d_xyz_, d_charges_);
   oe.compute_overlap(d_S_);

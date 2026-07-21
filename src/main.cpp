@@ -87,6 +87,8 @@ static void print_help(const char* prog) {
       << "  --cartesian              Cartesian orbital Gaussians\n"
       << "  --gradient               Nuclear gradient (analytic + numerical)\n"
       << "  --analytic-gradient      Analytic nuclear gradient only\n"
+      << "  --jit                    Enable cuEST JIT kernels (default)\n"
+      << "  --no-jit                 Disable JIT (AOT kernels, fp64)\n"
       << "  --help                   Show this help\n\n"
       << "Notes:\n"
       << "  Density fitting is required (--aux-basis). Closed-shell RKS\n"
@@ -128,6 +130,7 @@ int main(int argc, char* argv[]) {
   bool numerical_gradient_flag = true;
   bool quiet = false;
   int is_pure = 1;  // orbital basis: 1 = spherical, 0 = Cartesian
+  bool use_jit = true;
 
   for (int i = 1; i < argc; i++) {
     std::string arg = argv[i];
@@ -189,6 +192,10 @@ int main(int argc, char* argv[]) {
     } else if (arg == "--analytic-gradient") {
       gradient = true;
       numerical_gradient_flag = false;
+    } else if (arg == "--jit") {
+      use_jit = true;
+    } else if (arg == "--no-jit") {
+      use_jit = false;
     } else {
       std::cerr << "Unknown argument: " << arg << "\n";
       std::cerr << "Use --help for usage information.\n";
@@ -373,7 +380,7 @@ int main(int argc, char* argv[]) {
 
     auto dfjk = std::make_unique<DFJKBuilder>(
         ctx, basis_builder.basis(), aux_basis->basis(),
-        xyz.data(), mol.natom(), ex_frac, lrc_frac, lrc_omega);
+        xyz.data(), mol.natom(), ex_frac, lrc_frac, lrc_omega, use_jit);
     DFJKBuilder* dfjk_ptr = dfjk.get();
 
     // --- Set up ECP integrals ---
@@ -399,6 +406,7 @@ int main(int argc, char* argv[]) {
     scf_params.print_mos = print_mos;
     scf_params.print_level = quiet ? 0 : (verbose ? 2 : 1);
     scf_params.break_symmetry = break_symmetry;
+    scf_params.use_jit = use_jit;
 
     // --- Run SCF ---
     SCFSolver scf(ctx, basis_builder, *dfjk_ptr, &xc,
@@ -417,13 +425,13 @@ int main(int argc, char* argv[]) {
               scf.orbital_energies(), scf.orbital_energies_beta(),
               scf.mo_coefficients_host(), scf.mo_coefficients_beta_host(),
               scf.density_alpha_host(), scf.density_beta_host(),
-              &ecp_builder->ecp_electrons_per_atom());
+              &ecp_builder->ecp_electrons_per_atom(), use_jit);
         } else {
           gc_ptr = std::make_unique<GradientComputer>(
               ctx, basis_builder, *dfjk_ptr, &xc, ecp_int_ptr, mol,
               scf.nocc(), scf.orbital_energies(),
               scf.mo_coefficients_host(), scf.density_host(),
-              &ecp_builder->ecp_electrons_per_atom());
+              &ecp_builder->ecp_electrons_per_atom(), use_jit);
         }
         GradientComputer& gc = *gc_ptr;
         auto analytical = gc.compute();

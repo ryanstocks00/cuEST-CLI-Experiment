@@ -29,6 +29,8 @@ struct SCFParams {
   int print_level{2};
   /// Mix angle (radians) for HOMO–LUMO symmetry breaking on the β guess.
   double break_symmetry{0.3};
+  /// Use cuEST JIT kernels (DF-J, nuclear potential, …). Off ⇒ AOT + fp64.
+  bool use_jit{true};
 };
 
 class SCFSolver {

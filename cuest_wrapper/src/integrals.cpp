@@ -9,14 +9,29 @@
 #include "cuest_wrapper/raii.hpp"
 
 namespace cuest {
+namespace {
+
+/// When JIT is off, ffloat must also be off (cuEST requirement).
+template <typename ParamsT, typename JitAttr, typename FfloatAttr>
+void apply_jit_mode(ParamsT& params, cuestParametersType_t ptype,
+                    JitAttr jit_attr, FfloatAttr ffloat_attr, bool use_jit) {
+  if (use_jit) return;
+  cuestJITUsageMode_t jit = CUEST_JIT_USAGE_MODE_OFF;
+  cuestFfloatUsageMode_t ffloat = CUEST_FFLOAT_USAGE_MODE_OFF;
+  cuestParametersConfigure(ptype, params, jit_attr, &jit, sizeof(jit));
+  cuestParametersConfigure(ptype, params, ffloat_attr, &ffloat, sizeof(ffloat));
+}
+
+}  // namespace
 
 // ---------------------------------------------------------------------------
 // OneElectronIntegrals
 // ---------------------------------------------------------------------------
 OneElectronIntegrals::OneElectronIntegrals(CuESTContext& ctx,
                                              cuestAOBasis_t basis,
-                                             cuestAOPairList_t pair_list)
-    : ctx_(ctx) {
+                                             cuestAOPairList_t pair_list,
+                                             bool use_jit)
+    : ctx_(ctx), use_jit_(use_jit) {
   cuestWorkspaceDescriptor_t temp_desc{};
   OEIntPlanParams oe_params;
 
@@ -64,15 +79,21 @@ void OneElectronIntegrals::compute_kinetic(double* d_T) {
 void OneElectronIntegrals::compute_potential(double* d_V, uint64_t natom,
                                               const double* d_xyz,
                                               const double* d_charges) {
+  PotentialComputeParams params;
+  apply_jit_mode(params, CUEST_POTENTIALCOMPUTE_PARAMETERS,
+                 CUEST_POTENTIALCOMPUTE_PARAMETERS_JIT_USAGE_MODE,
+                 CUEST_POTENTIALCOMPUTE_PARAMETERS_FFLOAT_USAGE_MODE,
+                 use_jit_);
+
   cuestWorkspaceDescriptor_t temp_desc{};
   CUEST_CHECK(cuestPotentialComputeWorkspaceQuery(
-      ctx_, plan_, cuest::PotentialComputeParams{},
+      ctx_, plan_, params,
       &temp_desc, natom, d_xyz, d_charges, d_V));
   Workspace temp_ws(temp_desc);
 
   CUEST_NVTX("cuestPotentialCompute",
              cuestPotentialCompute(
-                 ctx_, plan_, cuest::PotentialComputeParams{},
+                 ctx_, plan_, params,
                  temp_ws.ptr(), natom, d_xyz, d_charges, d_V));
 }
 
@@ -82,8 +103,9 @@ void OneElectronIntegrals::compute_potential(double* d_V, uint64_t natom,
 DFJKBuilder::DFJKBuilder(CuESTContext& ctx, cuestAOBasis_t primary_basis,
                            cuestAOBasis_t aux_basis,
                            const double* xyz_host, uint64_t natom,
-                           double exchange_frac, double lrc_frac, double lrc_omega)
-    : ctx_(ctx) {
+                           double exchange_frac, double lrc_frac, double lrc_omega,
+                           bool use_jit)
+    : ctx_(ctx), use_jit_(use_jit) {
   {
     cuestWorkspaceDescriptor_t pers_desc{}, temp_desc{};
     AOPairListParams pl_params;
@@ -130,14 +152,20 @@ DFJKBuilder::~DFJKBuilder() {
 }
 
 void DFJKBuilder::compute_J(const double* d_D, double* d_J) {
+  DFCoulombComputeParams params;
+  apply_jit_mode(params, CUEST_DFCOULOMBCOMPUTE_PARAMETERS,
+                 CUEST_DFCOULOMBCOMPUTE_PARAMETERS_JIT_USAGE_MODE,
+                 CUEST_DFCOULOMBCOMPUTE_PARAMETERS_FFLOAT_USAGE_MODE,
+                 use_jit_);
+
   cuestWorkspaceDescriptor_t temp_desc{};
   CUEST_CHECK(cuestDFCoulombComputeWorkspaceQuery(
-      ctx_, plan_, cuest::DFCoulombComputeParams{},
+      ctx_, plan_, params,
       &temp_desc, d_D, d_J));
   Workspace temp_ws(temp_desc);
   CUEST_NVTX("cuestDFCoulombCompute",
              cuestDFCoulombCompute(
-                 ctx_, plan_, cuest::DFCoulombComputeParams{},
+                 ctx_, plan_, params,
                  temp_ws.ptr(), d_D, d_J));
 }
 
