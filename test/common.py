@@ -14,6 +14,9 @@ PROJ_DIR = Path(__file__).resolve().parent.parent
 MOLECULES_ROOT = PROJ_DIR / "data" / "molecules"
 MOLECULES_DIR = MOLECULES_ROOT / "small"  # single-molecule smoke/validation set
 BASIS_DIR = PROJ_DIR / "data" / "basis_sets"
+
+# VV10 nonlocal-correlation grid level (see run_pyscf_df).
+NLC_GRID_LEVEL = 3
 BUILD_DIR = PROJ_DIR / "build"
 EXE = BUILD_DIR / "cuest_dft"
 
@@ -637,17 +640,19 @@ def run_pyscf_df(atoms, basis_path, aux_path, functional, charge=0, spin=0,
             mf.xc = PYSCF_XC_MAP.get(functional, functional.lower())
             mf.grids.level = grid_level
             if functional.upper() in ("WB97X-V", "WB97M-V"):
-                # cuEST reuses the same grid for VV10 nonlocal correlation as
-                # for the semi-local XC part; PySCF's NLC grid (mf.nlcgrids)
-                # is a separate object with its own default level that does
-                # NOT follow mf.grids.level, so align it explicitly.
-                mf.nlcgrids.level = grid_level
+                # PySCF's NLC grid is a separate object whose level does not
+                # follow mf.grids.level, so set it explicitly. It does not need
+                # to match: VV10 is a smooth long-range functional and level 3
+                # is already converged to ~2e-12 against level 5, while costing
+                # 2.5x less. Level 1 (PySCF's default) is NOT enough — it sits
+                # ~1.6e-7 off, which would put a floor under the tolerance.
+                mf.nlcgrids.level = min(grid_level, NLC_GRID_LEVEL)
         else:
             mf = dft.UKS(mol).density_fit()
             mf.xc = PYSCF_XC_MAP.get(functional, functional.lower())
             mf.grids.level = grid_level
             if functional.upper() in ("WB97X-V", "WB97M-V"):
-                mf.nlcgrids.level = grid_level
+                mf.nlcgrids.level = min(grid_level, NLC_GRID_LEVEL)
         mf.max_cycle = 200
         mf.conv_tol = 1e-10
         # minao/sad: '1e' (Hcore) can converge to false minima for some

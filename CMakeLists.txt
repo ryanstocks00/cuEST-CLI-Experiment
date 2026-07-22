@@ -74,6 +74,7 @@ add_executable(cuest_dft
   src/main.cpp
   src/scf.cpp
   src/diis.cpp
+  src/diis_kernels.cu
   src/sad_guess.cpp
   src/atomic_config.cpp
   src/atomic_symmetry.cpp
@@ -87,7 +88,8 @@ target_include_directories(cuest_dft PRIVATE
 
 target_link_libraries(cuest_dft PRIVATE cuest_wrapper)
 
-target_compile_options(cuest_dft PRIVATE -Wall -Wextra -Wpedantic)
+# -Wpedantic only for C++: nvcc's generated host code trips it with line directives.
+target_compile_options(cuest_dft PRIVATE -Wall -Wextra $<$<COMPILE_LANGUAGE:CXX>:-Wpedantic>)
 target_compile_options(cuest_dft PRIVATE
   $<$<CONFIG:RELEASE>:-O3 -DNDEBUG -march=native>
 )

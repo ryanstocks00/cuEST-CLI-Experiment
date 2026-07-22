@@ -94,8 +94,7 @@ SCFSolver::SCFSolver(CuESTContext& ctx, BasisBuilder& basis,
   d_Cocc_a_.alloc(nao_ * nocc_a_pad * sizeof(double));
   d_Cocc_b_.alloc(nao_ * nocc_b_pad * sizeof(double));
 
-  diis_a_.init(params_.diis_max_space, static_cast<int>(nao_));
-  diis_b_.init(params_.diis_max_space, static_cast<int>(nao_));
+  diis_.init(params_.diis_max_space, static_cast<int>(nao_), uks_ ? 2 : 1);
 
   auto xyz_h = mol_.xyz_host();
   auto chg_h = ecp_cores ? mol_.charges_host(*ecp_cores) : mol_.charges_host();
@@ -585,8 +584,7 @@ void SCFSolver::run() {
   int N = static_cast<int>(nao_);
   int n2 = N * N;
   double e_prev = 0.0;
-  diis_a_.clear();
-  diis_b_.clear();
+  diis_.clear();
 
   for (iter_ = 1; iter_ <= params_.max_iter; iter_++) {
     NvtxRange iter_range("SCF iteration");
@@ -643,8 +641,9 @@ void SCFSolver::run() {
     // DIIS commutator ||FDS-SDF|| (raw Fock/D, before any extrapolation).
     // Still what DIIS extrapolates on; no longer the convergence test — see
     // the orbital gradient below and SCFParams::conv_thresh.
-    diis_a_.compute_residual(cublas_, d_S_, d_Fock_a_, d_D_a_);
-    if (uks_) diis_b_.compute_residual(cublas_, d_S_, d_Fock_b_, d_D_b_);
+    diis_.compute_residual(cublas_, d_S_, d_Fock_a_, d_D_a_,
+                           uks_ ? d_Fock_b_.get() : nullptr,
+                           uks_ ? d_D_b_.get() : nullptr);
 
     // Convergence metric: ‖g‖ = ‖2 C_vir^T F C_occ‖₂, the derivative of the
     // energy with respect to occupied→virtual rotations (PySCF's conv_tol_grad
@@ -675,11 +674,8 @@ void SCFSolver::run() {
       break;
     }
 
-    if (iter_ >= params_.diis_start) {
-      diis_a_.extrapolate(cublas_, d_Fock_a_);
-      if (uks_)
-        diis_b_.extrapolate(cublas_, d_Fock_b_);
-    }
+    if (iter_ >= params_.diis_start)
+      diis_.extrapolate(cublas_, d_Fock_a_, uks_ ? &d_Fock_b_ : nullptr);
 
     cublasDcopy(cublas_, n2, d_D_a_, 1, d_D_old_a_, 1);
     if (uks_)

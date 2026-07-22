@@ -232,7 +232,10 @@ class SCFSolver {
   /// MO coefficients are only meaningful after the first diagonalization; the
   /// SAD guess path reaches iteration 1 without having diagonalized anything.
   bool mos_valid_{false};
-  DIIS diis_a_, diis_b_;
+  /// One DIIS over both spin channels: the α and β Focks are coupled through
+  /// J and Vxc, so a single coefficient set is fitted to their combined error
+  /// rather than one per channel. See DIIS.
+  DIIS diis_;
 };
 
 }  // namespace cuest
