@@ -10,8 +10,14 @@
 
 namespace cuest {
 
-/// Mirrors cuEST's example matrix for the range-separated hybrids.
-inline void hybrid_dfjk_fractions(XCBuilder::Functional functional, XCBuilder& xc,
+/// Queries cuEST's own XC plan for the HF-exchange fractions to bake into
+/// the DF-JK plan, rather than hardcoding literature values: cuEST already
+/// exposes CUEST_XCINTPLAN_EXCHANGE_SCALE / _LRC_EXCHANGE_SCALE / _LRC_OMEGA
+/// as queryable attributes tied to the functional chosen at XC-plan creation
+/// (the same query-don't-hardcode approach used for VV10's constants). This
+/// previously hardcoded a literature table that silently mismapped
+/// XC_WB97X_V onto bare WB97X's (different) range-separation parameters.
+inline void hybrid_dfjk_fractions(XCBuilder::Functional /*functional*/, XCBuilder& xc,
                                   double& ex_frac, double& lrc_frac,
                                   double& lrc_omega) {
   ex_frac = 0.0;
@@ -24,30 +30,10 @@ inline void hybrid_dfjk_fractions(XCBuilder::Functional functional, XCBuilder& x
   }
   if (!xc.is_hybrid()) return;
 
-  if (!xc.is_lrc()) {
-    // Global hybrids (B3LYP, PBE0, ...): EXCHANGE_FRACTION = HF scale.
-    ex_frac = xc.exchange_scale();
-    return;
-  }
-
-  // Range-separated: plan holds both full-range and LRC fractions.
-  switch (functional) {
-    case XCBuilder::XC_CAM_B3LYP:
-      ex_frac = 0.19; lrc_frac = 0.46; lrc_omega = 0.33; break;
-    case XCBuilder::XC_WB97X:
-    case XCBuilder::XC_WB97X_V:
-      ex_frac = 0.157706; lrc_frac = 0.842294; lrc_omega = 0.3; break;
-    case XCBuilder::XC_WB97M_V:
-      ex_frac = 0.15; lrc_frac = 0.85; lrc_omega = 0.3; break;
-    case XCBuilder::XC_LC_WPBE:
-    case XCBuilder::XC_LC_WPBEH:
-      ex_frac = 0.0; lrc_frac = 1.0; lrc_omega = 0.4; break;
-    case XCBuilder::XC_HSE06:
-      ex_frac = 0.25; lrc_frac = -0.25; lrc_omega = 0.11; break;
-    default:
-      // Fallback: use XC query scale as full-range HF only.
-      ex_frac = xc.exchange_scale();
-      break;
+  ex_frac = xc.exchange_scale();
+  if (xc.is_lrc()) {
+    lrc_frac = xc.lrc_exchange_scale();
+    lrc_omega = xc.lrc_omega();
   }
 }
 

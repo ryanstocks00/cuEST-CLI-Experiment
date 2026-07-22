@@ -73,6 +73,7 @@ SCFSolver::SCFSolver(CuESTContext& ctx, BasisBuilder& basis,
   d_K_b_.alloc(n2_bytes);
   d_Vxc_a_.alloc(n2_bytes);
   d_Vxc_b_.alloc(n2_bytes);
+  d_Vnlc_a_.alloc(n2_bytes);
   d_eigvals_.alloc(nao_ * sizeof(double));
   d_Fwork_.alloc(n2_bytes);
   d_Swork_.alloc(n2_bytes);
@@ -227,6 +228,13 @@ void SCFSolver::build_fock_rks() {
     e_xc_ = exc_val;
     double one = 1.0;
     cublasDaxpy(cublas_, nao_*nao_, &one, d_Vxc_a_, 1, d_Fock_a_, 1);
+
+    if (xc_->is_vv10()) {
+      double enlc_val = 0.0;
+      xc_->compute_vv10_rks(ncols, d_Cocc_a_, &enlc_val, d_Vnlc_a_);
+      e_xc_ += enlc_val;
+      cublasDaxpy(cublas_, nao_*nao_, &one, d_Vnlc_a_, 1, d_Fock_a_, 1);
+    }
   } else {
     e_xc_ = 0.0;
   }
@@ -286,6 +294,16 @@ void SCFSolver::build_fock_uks() {
     e_xc_ = exc_val;
     cublasDaxpy(cublas_, nao_*nao_, &one, d_Vxc_a_, 1, d_Fock_a_, 1);
     cublasDaxpy(cublas_, nao_*nao_, &one, d_Vxc_b_, 1, d_Fock_b_, 1);
+
+    if (xc_->is_vv10()) {
+      double enlc_val = 0.0;
+      xc_->compute_vv10_uks(nocc_a_pad, nocc_b_pad, d_Cocc_a_, d_Cocc_b_,
+                            &enlc_val, d_Vnlc_a_);
+      e_xc_ += enlc_val;
+      // VV10 potential is shared by both spin channels (functional of total density only).
+      cublasDaxpy(cublas_, nao_*nao_, &one, d_Vnlc_a_, 1, d_Fock_a_, 1);
+      cublasDaxpy(cublas_, nao_*nao_, &one, d_Vnlc_a_, 1, d_Fock_b_, 1);
+    }
   } else if (xc_ && xc_->is_hf()) {
     e_xc_ = 0.0;
   }
@@ -464,12 +482,21 @@ void SCFSolver::assemble_sac_guess() {
   } else {
     // Restricted: fold both spin channels' atomic columns into one set
     // (concatenating both and halving reproduces 0.5*(D_a+D_b)), then rescale.
-    std::vector<double> Cr(static_cast<size_t>(N) * (total_cols_a + total_cols_b));
+    // Size Cr from Ca/Cb's actual (already padded-to-≥1-column) buffer
+    // sizes, not total_cols_a/total_cols_b directly: an element like H whose
+    // isolated atomic reference has zero beta-channel columns pads Cb to one
+    // all-zero column, and sizing Cr from the unpadded total undercounts by
+    // N, overflowing Cr's buffer when Cb is copied in. The extra all-zero
+    // padding column contributes nothing to the Gram matrix, so including it
+    // in ncols_r below is harmless.
+    const uint64_t cols_a_padded = Ca.size() / static_cast<size_t>(N);
+    const uint64_t cols_b_padded = Cb.size() / static_cast<size_t>(N);
+    std::vector<double> Cr(static_cast<size_t>(N) * (cols_a_padded + cols_b_padded));
     std::copy(Ca.begin(), Ca.end(), Cr.begin());
     std::copy(Cb.begin(), Cb.end(), Cr.begin() + static_cast<long>(Ca.size()));
     const double half = std::sqrt(0.5);
     for (auto& c : Cr) c *= half;
-    const uint64_t ncols_r = total_cols_a + total_cols_b;
+    const uint64_t ncols_r = cols_a_padded + cols_b_padded;
     const double scale =
         static_cast<double>(nocc_) / std::max(trace_ds(gram_from_columns(Cr, N, ncols_r)), 1e-10);
     const double s = std::sqrt(scale);

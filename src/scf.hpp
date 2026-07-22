@@ -202,6 +202,7 @@ class SCFSolver {
   DeviceArray<double> d_C_a_, d_C_b_;
   DeviceArray<double> d_Cocc_a_, d_Cocc_b_;
   DeviceArray<double> d_J_, d_K_a_, d_K_b_, d_Vxc_a_, d_Vxc_b_;
+  DeviceArray<double> d_Vnlc_a_;  // VV10 nonlocal XC contribution (shared across spin channels)
   DeviceArray<double> d_eigvals_, d_xyz_, d_charges_;
   DeviceArray<double> d_Fwork_, d_Swork_;
   DeviceArray<double> d_syev_work_;

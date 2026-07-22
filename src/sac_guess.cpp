@@ -263,7 +263,9 @@ AtomicGuessOrbitals compute_atomic_orbitals(CuESTContext& ctx, int Z,
 
   auto xyz = mol.xyz_host();
   DFJKBuilder dfjk(ctx, atom_basis.basis(), aux_basis.basis(), xyz.data(),
-                   mol.natom(), ex_frac, lrc_frac, lrc_omega, cfg.use_jit);
+                   mol.natom(), ex_frac, lrc_frac, lrc_omega, cfg.use_jit,
+                   cfg.fitting_cutoff, cfg.fitting_relative_conditioning,
+                   cfg.fitting_algorithm);
 
   SCFParams sp;
   sp.verbose = false;

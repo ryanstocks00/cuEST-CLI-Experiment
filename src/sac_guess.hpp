@@ -48,6 +48,12 @@ struct SACGuessConfig {
   int angular_pts{302};
   bool is_pure{true};
   bool use_jit{true};
+  // DF fitting knobs — kept in sync with the molecular DFJKBuilder's so the
+  // atomic reference SCF uses the same DF numerics as the real calculation.
+  double fitting_cutoff{1.0e-12};
+  bool fitting_relative_conditioning{true};
+  cuestDFIntPlanParametersFittingAlgorithm_t fitting_algorithm{
+      CUEST_DFINTPLAN_PARAMETERS_FITTING_ALGORITHM_QR};
 };
 
 /// Converged neutral (or ECP-valence-neutral) free-atom reference, in that

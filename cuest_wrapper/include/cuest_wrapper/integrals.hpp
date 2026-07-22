@@ -52,7 +52,11 @@ class DFJKBuilder {
                cuestAOBasis_t aux_basis,
                const double* xyz_host, uint64_t natom,
                double exchange_frac=0.0, double lrc_frac=0.0, double lrc_omega=0.0,
-               bool use_jit=true);
+               bool use_jit=true,
+               double fitting_cutoff=1.0e-12,
+               bool fitting_relative_conditioning=true,
+               cuestDFIntPlanParametersFittingAlgorithm_t fitting_algorithm=
+                   CUEST_DFINTPLAN_PARAMETERS_FITTING_ALGORITHM_QR);
 
   // Compute Coulomb matrix J from density matrix D
   void compute_J(const double* d_D, double* d_J);
@@ -117,13 +121,40 @@ class XCBuilder {
                         double* d_Vxc_a, double* d_Vxc_b,
                         size_t variable_buf_bytes = 2000000000ULL);
 
+  // RKS: nonlocal (VV10) XC contribution. Reuses the same plan_ as
+  // compute_vxc_rks (cuEST has no separate "nonlocal plan" type); the VV10
+  // scale/C/b constants are queried from the plan itself (tied to the
+  // functional chosen at construction), not hardcoded here. Only meaningful
+  // when is_vv10() is true.
+  void compute_vv10_rks(uint64_t nocc, const double* d_Cocc,
+                        double* enlc, double* d_Vnlc,
+                        size_t variable_buf_bytes = 2000000000ULL);
+
+  // UKS: nonlocal (VV10) XC contribution. VV10 is a functional of the total
+  // density only, so cuEST returns a single potential matrix shared by both
+  // spin channels (unlike compute_vxc_uks's separate alpha/beta outputs).
+  void compute_vv10_uks(uint64_t nocc_a, uint64_t nocc_b,
+                        const double* d_Cocc_a, const double* d_Cocc_b,
+                        double* enlc, double* d_Vnlc,
+                        size_t variable_buf_bytes = 2000000000ULL);
+
   cuestXCIntPlan_t plan() const { return plan_.get(); }
   // Query if functional is hybrid (has exact exchange)
   bool is_hybrid();
   bool is_lrc();            // has long-range correction
   bool is_hf() const { return functional_ == XC_HF; }
+  // Does this functional include VV10 nonlocal correlation (e.g. WB97X-V, WB97M-V)?
+  bool is_vv10();
+  // VV10 constants tied to the functional (only meaningful when is_vv10());
+  // queried from cuEST's plan, not hardcoded — used for both the nonlocal
+  // potential (compute_vv10_rks/uks) and the nonlocal gradient (GradientComputer).
+  double vv10_scale();
+  double vv10_c();
+  double vv10_b();
   Functional functional() const { return functional_; }
-  double exchange_scale();  // fraction of HF exchange for hybrids
+  double exchange_scale();      // fraction of (short-range, for LRC) HF exchange for hybrids
+  double lrc_exchange_scale();  // additional long-range HF exchange fraction (LRC hybrids only)
+  double lrc_omega();           // range-separation omega (LRC hybrids only)
 
  private:
   static cuestXCIntPlanParametersFunctional_t to_cuest_functional(Functional id);

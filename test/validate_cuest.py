@@ -22,7 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (  # noqa: E402
-    BASIS_DIR, BASIS_SETS, EXE, PROJ_DIR, as_grad_nx3, aux_json_for,
+    BASIS_DIR, BASIS_SETS, EXE, MOLECULES_DIR, PROJ_DIR, as_grad_nx3, aux_json_for,
     aux_json_from_label, aux_label_for, flatten_grad, is_finite,
     parse_cuest_energy, parse_cuest_scf_iterations, parse_gradient_block,
 )
@@ -173,7 +173,7 @@ def main():
             "CH2I2": "ch2i2.xyz", "OH": "oh.xyz",
         }
         fname = name_map.get(mol_label, f"{mol_label.lower()}.xyz")
-        return str(PROJ_DIR / "data" / "molecules" / fname)
+        return str(MOLECULES_DIR / fname)
 
     testable = []
     for ref in refs:

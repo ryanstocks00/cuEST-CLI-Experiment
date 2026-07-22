@@ -2,12 +2,19 @@
 
 A C++ DFT package built on [NVIDIA cuEST](https://developer.nvidia.com/cuda/cuda-x-libraries/cuest) (v0.2.0) with RAII wrappers, analytic gradients, and PySCF-validation.
 
+> **Note:** The initial guess is a Superposition of Atomic *Coefficients* (SAC), not the
+> more standard Superposition of Atomic *Densities* (SAD). cuEST's density-fitted
+> exchange (K) API only accepts occupied MO coefficients, not an arbitrary density
+> matrix, so a density guess would require a custom fock build or no exchange on the first
+> iteration. A density guess would be preferable to allow spherical averaging.
+
 ## Features
 
 - **Full SCF**: RKS (Restricted Kohn-Sham) with density fitting (RI-JK)
 - **DIIS**: Direct inversion in iterative subspace, configurable space and start
 - **Gradients**: Analytic or numerical finite differences
 - **Functionals**: PBE, B3LYP, B3LYP5, PBE0, CAM-B3LYP, ωB97X, ωB97X-V, ωB97M-V, HSE06, M06, M06-2X, LC-ωPBE, LC-ωPBEh
+  (ωB97X-V/ωB97M-V include the VV10 nonlocal-correlation term via cuEST's separate nonlocal XC potential API)
 - **ECP support**: Effective core potentials
 - **C++ RAII**: Memory-safe wrappers around the cuEST C API
 - **Validated**: SCF energies match PySCF-DF to ~0.01 mHa (light systems)
@@ -57,9 +64,10 @@ Orbital ↔ auxiliary pairings used by the validators (`test/common.py`):
 | cc-pVDZ | def2-universal-jkfit (no cc-pvdz-jkfit on BSE) |
 | cc-pVTZ / VQZ | matching `cc-pV*Z-jkfit` |
 
-Default `test/reference.json` matrix: closed-shell molecules × {HF, PBE, WB97X}
-× all bases × {spherical, Cartesian}, plus UKS OH (mult=2) × {HF, PBE, PBE0, WB97X}
-× selected bases. SCF iteration counts included. Gradients are stored for
+Default `test/reference.json` matrix: closed-shell molecules × {HF, PBE, WB97X,
+WB97X-V, WB97M-V} × all bases × {spherical, Cartesian}, plus UKS OH (mult=2)
+× {HF, PBE, PBE0, WB97X, WB97X-V, WB97M-V} × selected bases. SCF iteration
+counts included. Gradients are stored for
 spherical-orbital refs only (analytic DF; hybrids skip known-bad SP-only cases).
 The DF auxiliary basis is always spherical (cuEST requirement; `--cartesian`
 applies to the primary basis only). Regenerate with:
@@ -89,10 +97,10 @@ Usage: ./build/cuest_dft --xyz <file> --basis <json_file> [options]
 
 Required arguments:
   --xyz <path>             Input geometry in XYZ format
-  --basis <path>           Primary basis set in BSE JSON format
-  --aux-basis <path>       Auxiliary/DF (RI-J) basis set (BSE JSON)
+  --basis <path>           Basis set in BSE JSON format
 
 Optional arguments:
+  --aux-basis <path>       Auxiliary/DF (RI-J) basis set (BSE JSON)
   --functional <name>      XC functional (default: PBE)
   --radial-pts <n>         Radial grid points (default: 75)
   --angular-pts <n>        Angular Lebedev points (default: 302)
@@ -112,8 +120,34 @@ Other options:
   --quiet                  Minimal output
   --verbose                Verbose output
   --print-mos              Print final MO energies
-  --gradient               Compute and print nuclear gradient
+  --spherical              Spherical (pure) orbital Gaussians (default)
+  --cartesian              Cartesian orbital Gaussians
+  --gradient               Nuclear gradient (analytic + numerical)
+  --analytic-gradient      Analytic nuclear gradient only
+  --jit                    Enable cuEST JIT kernels (default)
+  --no-jit                 Disable JIT (AOT kernels, fp64)
   --help                   Show this help
+
+Advanced/tuning options (cuEST engine parameters; defaults match cuEST's own):
+  --max-gauss-hermite <n>       Max Gauss-Hermite quadrature points (default: 20)
+  --max-l-solid-harmonic <n>    Max angular momentum for solid-harmonic
+                                transforms (default: 10)
+  --max-rys <n>                 Max Rys quadrature points; 0 = largest
+                                available (default: 0)
+  --jit-cache-dir <path>        JIT kernel cache directory; must be a
+                                trusted, non-world-writable path (default:
+                                derived ~/.cuest_cache/...)
+  --jit-compile-threads <n>     Parallel JIT precompile worker threads,
+                                clamped to 256 (default: 16)
+  --df-fitting-cutoff <val>     Eigenvalue threshold below which DF metric
+                                eigenvalues are discarded (default: 1e-12)
+  --df-fitting-absolute         Treat --df-fitting-cutoff as absolute, not
+                                relative to the largest eigenvalue (default:
+                                relative)
+  --df-fitting-algorithm <alg>  DF metric inversion: qr (default, most
+                                robust) or matrixpower
+  Note: --rys-scheme is intentionally not exposed — cuEST currently
+  defines only one scheme, so the flag would have no effect.
 
 Notes:
   Density fitting is required. Closed-shell RKS (multiplicity 1) and
@@ -215,7 +249,7 @@ src/                           # CLI / application layer
 ├── scf.hpp / scf.cpp          # SCF solver with DIIS + cuSOLVER
 ├── diis.hpp / diis.cpp        # Device Pulay DIIS
 ├── sac_guess.hpp / sac_guess.cpp  # SAC initial guess (cached atomic UKS)
-├── dfjk_hybrid.hpp            # Hybrid/LRC DF-JK exchange fractions
+├── dfjk_hybrid.hpp            # Hybrid/LRC DF-JK exchange fractions (queried from cuEST's XC plan)
 ├── basis_from_json.cpp        # BasisBuilder / AuxBasis from BSE JSON
 ├── basis_ecp_from_json.cpp    # ECPBuilder from BSE JSON
 ├── grad_numerical.hpp         # FD gradients via subprocess
