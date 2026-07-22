@@ -231,7 +231,7 @@ void SCFSolver::build_fock_rks() {
                           cudaMemcpyDeviceToDevice));
   }
 
-  if (xc_ && (xc_->is_hybrid() || xc_->is_hf()) && ncols > 0) {
+  if (needs_exchange() && ncols > 0) {
     const double k_factor = -1.0;
     dfjk_.compute_K(ncols, d_Cocc_a_, d_K_a_);
     cublasDaxpy(cublas_, nao_*nao_, &k_factor, d_K_a_, 1, d_Fock_a_, 1);
@@ -286,7 +286,7 @@ void SCFSolver::build_fock_uks() {
                             cudaMemcpyDeviceToDevice));
   }
 
-  if (xc_ && (xc_->is_hybrid() || xc_->is_hf())) {
+  if (needs_exchange()) {
     const double k_factor = -1.0;
     if (ncols_a > 0) {
       dfjk_.compute_K(ncols_a, d_Cocc_a_, d_K_a_);
@@ -603,7 +603,7 @@ void SCFSolver::run() {
       cublasDaxpy(cublas_, n2, &one, d_D_b_, 1, d_D_tot_, 1);
       e_j_ = 0.5 * frobenius_dot(d_D_tot_, d_J_, n2);
       e_k_ = 0.0;
-      if (xc_ && (xc_->is_hybrid() || xc_->is_hf())) {
+      if (needs_exchange()) {
         e_k_ = -0.5 * (frobenius_dot(d_D_a_, d_K_a_, n2) +
                        frobenius_dot(d_D_b_, d_K_b_, n2));
       }
@@ -616,7 +616,7 @@ void SCFSolver::run() {
       e_hcore_ = 2.0 * tr_dh;
       e_j_ = 2.0 * tr_dj;
       e_k_ = 0.0;
-      if (xc_ && (xc_->is_hybrid() || xc_->is_hf()))
+      if (needs_exchange())
         e_k_ = -frobenius_dot(d_D_a_, d_K_a_, n2);
       e_kin_ = 2.0 * frobenius_dot(d_D_a_, d_T_, n2);
       e_ne_  = 2.0 * frobenius_dot(d_D_a_, d_V_, n2);
@@ -728,7 +728,7 @@ void SCFSolver::run() {
               << "Nuclear repulsion: " << e_nuc_ << " Ha\n"
               << "E_Hcore:           " << e_hcore_ << " Ha\n"
               << "E_J:               " << e_j_ << " Ha\n";
-    if (xc_ && (xc_->is_hybrid() || xc_->is_hf()))
+    if (needs_exchange())
       std::cout << "E_K (exchange):    " << e_k_ << " Ha\n";
     if (xc_ && !xc_->is_hf())
       std::cout << "XC energy:         " << e_xc_ << " Ha\n";

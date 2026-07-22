@@ -160,6 +160,14 @@ class SCFSolver {
   bool converged() const { return converged_; }
 
  private:
+  /// True when the functional needs an exact-exchange (K) build. Not the same
+  /// as is_hybrid(): a purely long-range-corrected functional such as LC-ωPBE
+  /// reports hybrid=false yet still carries full exact exchange at long range,
+  /// so gating on is_hybrid() alone silently drops K and evaluates it as a
+  /// pure GGA. See dfjk_hybrid.hpp.
+  [[nodiscard]] bool needs_exchange() const {
+    return xc_ && (xc_->is_hybrid() || xc_->is_hf() || xc_->is_lrc());
+  }
   void build_core_hamiltonian();
   void build_fock_rks();
   void build_fock_uks();

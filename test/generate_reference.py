@@ -34,9 +34,14 @@ REFERENCE_FILE = PROJ_DIR / "test" / "reference.json"
 # XC grid level for the PySCF reference. Level 3 (PySCF's default) is NOT
 # converged: it sits ~1e-5 Ha from the grid limit for a range-separated
 # functional and ~1e-6 for a GGA, which put a floor under how tight the
-# validation tolerance could be. Levels 5-7 agree with each other to <1e-7 and
-# cost only ~2.5x level 3, so the references are generated converged.
-DEFAULT_GRID_LEVEL = 5
+# validation tolerance could be.
+#
+# Level 5 is already converged to ~2e-9 against level 6, so 7 is chosen for
+# headroom rather than necessity: the references are regenerated rarely and
+# then compared against tightly, so it is worth buying the margin once. It is
+# a real cost — roughly an order of magnitude over level 3 once the VV10
+# functionals are included — so a full regeneration takes hours, not minutes.
+DEFAULT_GRID_LEVEL = 7
 
 # cuEST cuestDFSymmetricDerivativeCompute throws on hybrids for SP-only
 # orbital bases (STO-3G, 6-31G). Skip storing grads for those refs.

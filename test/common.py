@@ -16,7 +16,8 @@ MOLECULES_DIR = MOLECULES_ROOT / "small"  # single-molecule smoke/validation set
 BASIS_DIR = PROJ_DIR / "data" / "basis_sets"
 
 # VV10 nonlocal-correlation grid level (see run_pyscf_df).
-NLC_GRID_LEVEL = 3
+NLC_GRID_LEVEL = 5
+
 BUILD_DIR = PROJ_DIR / "build"
 EXE = BUILD_DIR / "cuest_dft"
 
@@ -642,10 +643,10 @@ def run_pyscf_df(atoms, basis_path, aux_path, functional, charge=0, spin=0,
             if functional.upper() in ("WB97X-V", "WB97M-V"):
                 # PySCF's NLC grid is a separate object whose level does not
                 # follow mf.grids.level, so set it explicitly. It does not need
-                # to match: VV10 is a smooth long-range functional and level 3
-                # is already converged to ~2e-12 against level 5, while costing
-                # 2.5x less. Level 1 (PySCF's default) is NOT enough — it sits
-                # ~1.6e-7 off, which would put a floor under the tolerance.
+                # to match: VV10 is a smooth long-range functional, already
+                # converged to ~2e-12 by level 3, so level 5 is headroom. What
+                # it must not be is PySCF's default of 1, which sits ~1.6e-7
+                # off and would put a floor under the validation tolerance.
                 mf.nlcgrids.level = min(grid_level, NLC_GRID_LEVEL)
         else:
             mf = dft.UKS(mol).density_fit()
