@@ -27,7 +27,7 @@
 #include "functionals.hpp"
 #include "io/parsers.hpp"
 #include "cuest_wrapper/raii.hpp"
-#include "sac_guess.hpp"
+#include "sad_guess.hpp"
 #include "scf.hpp"
 
 using namespace cuest;
@@ -48,11 +48,20 @@ static void print_help(const char* prog) {
       << "  --radial-pts <n>         Radial grid points (default: 75)\n"
       << "  --angular-pts <n>        Angular Lebedev points (default: 302)\n"
       << "  --charge <int>           Total charge (default: 0)\n"
-      << "  --multiplicity <int>     Spin multiplicity (default: 1; UKS if ≠ 1)\n"
-      << "  --break-symmetry <rad>   UKS β HOMO/LUMO mix angle (default: 0.3)\n\n"
+      << "  --multiplicity <int>     Spin multiplicity (default: 1)\n"
+      << "  --unrestricted, --uks    Solve unrestricted even at multiplicity 1\n"
+      << "                           (multiplicity > 1 is always unrestricted)\n"
+      << "  --break-symmetry <rad>   UKS β HOMO/LUMO mix angle (default: 0.1);\n"
+      << "                           only applied when nalpha == nbeta\n\n"
+      << "Initial guess options:\n"
+      << "  --hcore-guess            Use the bare core-Hamiltonian guess instead\n"
+      << "                           of SAD (superposition of atomic densities)\n"
+      << "  --sad-functional-atoms   Solve the SAD reference atoms with the\n"
+      << "                           molecular functional instead of HF (default\n"
+      << "                           HF matches PySCF and needs no XC grid)\n\n"
       << "SCF convergence options:\n"
       << "  --max-iter <n>           Max SCF iterations (default: 250)\n"
-      << "  --conv-thresh <val>      DIIS error |FDS-SDF| convergence (default: 1e-6)\n"
+      << "  --conv-thresh <val>      Orbital-gradient norm |g| convergence (default: 1e-4)\n"
       << "  --energy-conv <val>      Energy change convergence (default: 1e-8)\n"
       << "  --diis-start <n>         Iteration to enable DIIS (default: 1)\n"
       << "  --diis-space <n>         DIIS subspace dimension (default: 6)\n"
@@ -71,8 +80,9 @@ static void print_help(const char* prog) {
       << "Notes:\n"
       << "  Density fitting is required (--aux-basis). Closed-shell RKS\n"
       << "  (multiplicity 1) or unrestricted UKS (multiplicity > 1) are supported.\n"
-      << "  UKS: --break-symmetry mixes β HOMO/LUMO after the first diagonalization\n"
-      << "  (including open-shell radicals with a degenerate β frontier).\n"
+      << "  UKS: --break-symmetry mixes β HOMO/LUMO after the first diagonalization,\n"
+      << "  but only when nalpha == nbeta (an artificially closed-shell guess).\n"
+      << "  A genuinely spin-polarised system has no symmetry to break.\n"
       << "  Analytic gradients (RKS and UKS) via --gradient / --analytic-gradient.\n"
       << "  The DF auxiliary basis is always spherical; --cartesian applies\n"
       << "  to the orbital basis only.\n\n"
@@ -96,9 +106,9 @@ int main(int argc, char* argv[]) {
   int angular_pts = 302;
   int charge = 0;
   int multiplicity = 1;
-  double break_symmetry = 0.3;
+  double break_symmetry = 0.1;
   int max_iter = 250;
-  double conv_thresh = 1e-6;
+  double conv_thresh = 1e-4;
   double energy_conv = 1e-8;
   int diis_start = 1;
   int diis_space = 6;
@@ -110,6 +120,9 @@ int main(int argc, char* argv[]) {
   bool quiet = false;
   int is_pure = 1;  // orbital basis: 1 = spherical, 0 = Cartesian
   bool use_jit = true;
+  bool unrestricted = false;
+  bool hcore_guess = false;
+  bool sad_functional_atoms = false;
 
   for (int i = 1; i < argc; i++) {
     std::string arg = argv[i];
@@ -165,6 +178,12 @@ int main(int argc, char* argv[]) {
       is_pure = 1;
     } else if (arg == "--cartesian") {
       is_pure = 0;
+    } else if (arg == "--unrestricted" || arg == "--uks") {
+      unrestricted = true;
+    } else if (arg == "--hcore-guess") {
+      hcore_guess = true;
+    } else if (arg == "--sad-functional-atoms") {
+      sad_functional_atoms = true;
     } else if (arg == "--gradient") {
       gradient = true;
       numerical_gradient_flag = true;
@@ -359,18 +378,22 @@ int main(int argc, char* argv[]) {
     scf_params.use_jit = use_jit;
 
     // --- Run SCF ---
-    SACGuessConfig sac_cfg;
-    sac_cfg.basis_path = basis_path;
-    sac_cfg.aux_basis_path = aux_basis_path;
-    sac_cfg.functional = functional;
-    sac_cfg.radial_pts = radial_pts;
-    sac_cfg.angular_pts = angular_pts;
-    sac_cfg.is_pure = (is_pure != 0);
-    sac_cfg.use_jit = use_jit;
+    scf_params.force_hcore_guess = hcore_guess;
+    scf_params.unrestricted = unrestricted;
+
+    SADGuessConfig sad_cfg;
+    sad_cfg.basis_path = basis_path;
+    sad_cfg.aux_basis_path = aux_basis_path;
+    sad_cfg.is_pure = (is_pure != 0);
+    sad_cfg.use_jit = use_jit;
+    sad_cfg.use_parent_functional = sad_functional_atoms;
+    sad_cfg.functional = functional;
+    sad_cfg.radial_pts = radial_pts;
+    sad_cfg.angular_pts = angular_pts;
 
     SCFSolver scf(ctx, basis_builder, *dfjk_ptr, &xc,
                    ecp_builder_ptr, ecp_int_ptr,
-                   mol, scf_params, &sac_cfg);
+                   mol, scf_params, &sad_cfg);
     scf.run();
 
     // --- Gradient computation ---
