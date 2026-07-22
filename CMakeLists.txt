@@ -147,6 +147,22 @@ add_executable(test_atomic_symmetry
 target_include_directories(test_atomic_symmetry PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_compile_options(test_atomic_symmetry PRIVATE -Wall -Wextra -Wpedantic)
 
+# ---------------------------------------------------------------------------
+# probe_operators — evaluates K and Vxc on a supplied density so the operators
+# can be compared against another code term by term (tools/probe_operators.cpp).
+# ---------------------------------------------------------------------------
+add_executable(probe_operators
+  tools/probe_operators.cpp
+  src/basis_from_json.cpp
+  src/basis_ecp_from_json.cpp
+)
+target_include_directories(probe_operators PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(probe_operators PRIVATE cuest_wrapper)
+target_compile_options(probe_operators PRIVATE -Wall -Wextra -Wpedantic)
+set_target_properties(probe_operators PROPERTIES
+  BUILD_RPATH "${CUEST_LIB_DIR}"
+  INSTALL_RPATH "${CUEST_LIB_DIR}")
+
 # Install
 install(TARGETS cuest_dft DESTINATION bin)
 install(TARGETS cuest_wrapper ARCHIVE DESTINATION lib)
