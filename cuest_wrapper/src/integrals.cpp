@@ -107,7 +107,10 @@ DFJKBuilder::DFJKBuilder(CuESTContext& ctx, cuestAOBasis_t primary_basis,
                            cuestAOBasis_t aux_basis,
                            const double* xyz_host, uint64_t natom,
                            double exchange_frac, double lrc_frac, double lrc_omega,
-                           bool use_jit)
+                           bool use_jit,
+                           double fitting_cutoff,
+                           bool fitting_relative_conditioning,
+                           cuestDFIntPlanParametersFittingAlgorithm_t fitting_algorithm)
     : ctx_(ctx), use_jit_(use_jit) {
   {
     cuestWorkspaceDescriptor_t pers_desc{}, temp_desc{};
@@ -132,6 +135,13 @@ DFJKBuilder::DFJKBuilder(CuESTContext& ctx, cuestAOBasis_t primary_basis,
         CUEST_DFINTPLAN_PARAMETERS_LRC_EXCHANGE_FRACTION, &lrc_frac, sizeof(double));
     cuestParametersConfigure(CUEST_DFINTPLAN_PARAMETERS, df_params,
         CUEST_DFINTPLAN_PARAMETERS_LRC_EXCHANGE_OMEGA, &lrc_omega, sizeof(double));
+    cuestParametersConfigure(CUEST_DFINTPLAN_PARAMETERS, df_params,
+        CUEST_DFINTPLAN_PARAMETERS_FITTING_CUTOFF, &fitting_cutoff, sizeof(double));
+    int32_t rel_cond = fitting_relative_conditioning ? 1 : 0;
+    cuestParametersConfigure(CUEST_DFINTPLAN_PARAMETERS, df_params,
+        CUEST_DFINTPLAN_PARAMETERS_FITTING_RELATIVE_CONDITIONING, &rel_cond, sizeof(rel_cond));
+    cuestParametersConfigure(CUEST_DFINTPLAN_PARAMETERS, df_params,
+        CUEST_DFINTPLAN_PARAMETERS_FITTING_ALGORITHM, &fitting_algorithm, sizeof(fitting_algorithm));
 
     cuestWorkspaceDescriptor_t pers_desc{}, temp_desc{};
     CUEST_CHECK(cuestDFIntPlanCreateWorkspaceQuery(
@@ -290,8 +300,88 @@ void XCBuilder::compute_vxc_uks(uint64_t nocc_a, uint64_t nocc_b,
                  exc, d_Vxc_a, d_Vxc_b));
 }
 
+double XCBuilder::vv10_scale() { return plan_.query<double>(ctx_, CUEST_XCINTPLAN_VV10_SCALE); }
+double XCBuilder::vv10_c() { return plan_.query<double>(ctx_, CUEST_XCINTPLAN_VV10_C); }
+double XCBuilder::vv10_b() { return plan_.query<double>(ctx_, CUEST_XCINTPLAN_VV10_B); }
+
+void XCBuilder::compute_vv10_rks(uint64_t nocc, const double* d_Cocc,
+                                  double* enlc, double* d_Vnlc,
+                                  size_t variable_buf_bytes) {
+  double scale = vv10_scale();
+  double c = vv10_c();
+  double b = vv10_b();
+
+  NonlocalXCPotentialRKSComputeParams params;
+  cuestParametersConfigure(CUEST_NONLOCALXCPOTENTIALRKSCOMPUTE_PARAMETERS, params,
+      CUEST_NONLOCALXCPOTENTIALRKSCOMPUTE_PARAMETERS_VV10_SCALE, &scale, sizeof(double));
+  cuestParametersConfigure(CUEST_NONLOCALXCPOTENTIALRKSCOMPUTE_PARAMETERS, params,
+      CUEST_NONLOCALXCPOTENTIALRKSCOMPUTE_PARAMETERS_VV10_C, &c, sizeof(double));
+  cuestParametersConfigure(CUEST_NONLOCALXCPOTENTIALRKSCOMPUTE_PARAMETERS, params,
+      CUEST_NONLOCALXCPOTENTIALRKSCOMPUTE_PARAMETERS_VV10_B, &b, sizeof(double));
+
+  cuestWorkspaceDescriptor_t temp_desc{};
+  cuestWorkspaceDescriptor_t var_buf{};
+  var_buf.hostBufferSizeInBytes = 0;
+  var_buf.deviceBufferSizeInBytes = variable_buf_bytes;
+
+  CUEST_CHECK(cuestNonlocalXCPotentialRKSComputeWorkspaceQuery(
+      ctx_, plan_, params,
+      &var_buf, &temp_desc,
+      nocc, d_Cocc, enlc, d_Vnlc));
+
+  ctx_.scratch().ensure(temp_desc);
+  CUEST_NVTX("cuestNonlocalXCPotentialRKSCompute",
+             cuestNonlocalXCPotentialRKSCompute(
+                 ctx_, plan_, params,
+                 &var_buf, ctx_.scratch().ptr(),
+                 nocc, d_Cocc, enlc, d_Vnlc));
+}
+
+void XCBuilder::compute_vv10_uks(uint64_t nocc_a, uint64_t nocc_b,
+                                  const double* d_Cocc_a,
+                                  const double* d_Cocc_b,
+                                  double* enlc, double* d_Vnlc,
+                                  size_t variable_buf_bytes) {
+  double scale = vv10_scale();
+  double c = vv10_c();
+  double b = vv10_b();
+
+  NonlocalXCPotentialUKSComputeParams params;
+  cuestParametersConfigure(CUEST_NONLOCALXCPOTENTIALUKSCOMPUTE_PARAMETERS, params,
+      CUEST_NONLOCALXCPOTENTIALUKSCOMPUTE_PARAMETERS_VV10_SCALE, &scale, sizeof(double));
+  cuestParametersConfigure(CUEST_NONLOCALXCPOTENTIALUKSCOMPUTE_PARAMETERS, params,
+      CUEST_NONLOCALXCPOTENTIALUKSCOMPUTE_PARAMETERS_VV10_C, &c, sizeof(double));
+  cuestParametersConfigure(CUEST_NONLOCALXCPOTENTIALUKSCOMPUTE_PARAMETERS, params,
+      CUEST_NONLOCALXCPOTENTIALUKSCOMPUTE_PARAMETERS_VV10_B, &b, sizeof(double));
+
+  cuestWorkspaceDescriptor_t temp_desc{};
+  cuestWorkspaceDescriptor_t var_buf{};
+  var_buf.hostBufferSizeInBytes = 0;
+  var_buf.deviceBufferSizeInBytes = variable_buf_bytes;
+
+  CUEST_CHECK(cuestNonlocalXCPotentialUKSComputeWorkspaceQuery(
+      ctx_, plan_, params,
+      &var_buf, &temp_desc,
+      nocc_a, nocc_b,
+      d_Cocc_a, d_Cocc_b,
+      enlc, d_Vnlc));
+
+  ctx_.scratch().ensure(temp_desc);
+  CUEST_NVTX("cuestNonlocalXCPotentialUKSCompute",
+             cuestNonlocalXCPotentialUKSCompute(
+                 ctx_, plan_, params,
+                 &var_buf, ctx_.scratch().ptr(),
+                 nocc_a, nocc_b,
+                 d_Cocc_a, d_Cocc_b,
+                 enlc, d_Vnlc));
+}
+
 bool XCBuilder::is_hybrid() {
   return plan_.query<int32_t>(ctx_, CUEST_XCINTPLAN_IS_HYBRID) != 0;
+}
+
+bool XCBuilder::is_vv10() {
+  return plan_.query<int32_t>(ctx_, CUEST_XCINTPLAN_IS_VV10) != 0;
 }
 
 bool XCBuilder::is_lrc() {
@@ -300,6 +390,14 @@ bool XCBuilder::is_lrc() {
 
 double XCBuilder::exchange_scale() {
   return plan_.query<double>(ctx_, CUEST_XCINTPLAN_EXCHANGE_SCALE);
+}
+
+double XCBuilder::lrc_exchange_scale() {
+  return plan_.query<double>(ctx_, CUEST_XCINTPLAN_LRC_EXCHANGE_SCALE);
+}
+
+double XCBuilder::lrc_omega() {
+  return plan_.query<double>(ctx_, CUEST_XCINTPLAN_LRC_OMEGA);
 }
 
 // ---------------------------------------------------------------------------

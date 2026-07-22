@@ -72,6 +72,16 @@ struct SADGuessConfig {
   XCBuilder::Functional functional{XCBuilder::XC_PBE};
   int radial_pts{75};
   int angular_pts{302};
+
+  // DF fitting knobs — kept in sync with the molecular DFJKBuilder's so the
+  // atomic reference is solved with the same DF numerics as the calculation it
+  // seeds. They deliberately do *not* enter the disk-cache key: they change the
+  // atom by far less than the guess needs to be accurate to, and keying on them
+  // would fragment the cache across otherwise-identical runs.
+  double fitting_cutoff{1.0e-12};
+  bool fitting_relative_conditioning{true};
+  cuestDFIntPlanParametersFittingAlgorithm_t fitting_algorithm{
+      CUEST_DFINTPLAN_PARAMETERS_FITTING_ALGORITHM_QR};
 };
 
 /// Converged spherically symmetric free-atom reference, in that element's own

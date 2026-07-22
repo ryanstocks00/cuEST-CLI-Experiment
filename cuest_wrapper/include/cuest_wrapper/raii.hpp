@@ -351,5 +351,15 @@ using XCPotentialRKSComputeParams =
     Parameters<CUEST_XCPOTENTIALRKSCOMPUTE_PARAMETERS>;
 using XCPotentialUKSComputeParams =
     Parameters<CUEST_XCPOTENTIALUKSCOMPUTE_PARAMETERS>;
+using NonlocalXCPotentialRKSComputeParams =
+    Parameters<CUEST_NONLOCALXCPOTENTIALRKSCOMPUTE_PARAMETERS>;
+using NonlocalXCPotentialUKSComputeParams =
+    Parameters<CUEST_NONLOCALXCPOTENTIALUKSCOMPUTE_PARAMETERS>;
 
 }  // namespace cuest
+
+// NOTE: cuestNonlocalXCDerivativeRKS/UKSComputeParameters_t (used by
+// GradientComputer, cuest_wrapper/include/cuest_wrapper/gradients.hpp)
+// are configured with plain cuestParametersCreate/Configure/Destroy calls
+// there directly, matching the style already used for every other gradient
+// derivative parameters type in that file (no Parameters<> alias needed).

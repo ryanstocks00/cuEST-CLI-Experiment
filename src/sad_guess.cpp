@@ -395,7 +395,9 @@ AtomicGuessOrbitals compute_atomic_orbitals(CuESTContext& ctx, int Z,
   }
 
   DFJKBuilder dfjk(ctx, atom_basis.basis(), aux_basis.basis(), xyz_h.data(),
-                   mol.natom(), ex_frac, lrc_frac, lrc_omega, cfg.use_jit);
+                   mol.natom(), ex_frac, lrc_frac, lrc_omega, cfg.use_jit,
+                   cfg.fitting_cutoff, cfg.fitting_relative_conditioning,
+                   cfg.fitting_algorithm);
 
   // --- one-electron integrals ---
   const size_t n2 = static_cast<size_t>(nao) * nao;

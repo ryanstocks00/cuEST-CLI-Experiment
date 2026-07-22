@@ -65,14 +65,15 @@ FUNCTIONALS = [
 
 # Default reference / energy-matrix functionals (closed-shell).
 # HF isolates DF J/K (no XC grid); PBE/WB97X exercise grid + hybrids.
-REF_FUNCTIONALS = ["HF", "PBE", "WB97X"]
+# WB97X-V/WB97M-V additionally exercise the VV10 nonlocal-correlation path.
+REF_FUNCTIONALS = ["HF", "PBE", "WB97X", "WB97X-V", "WB97M-V"]
 SHELL_TYPES = ("spherical", "cartesian")
 
 # Open-shell UKS reference matrix (multiplicity > 1)
 UKS_MOLECULES = [
     ("oh.xyz", "OH", 2, 1),  # xyz, label, multiplicity, PySCF spin=2S
 ]
-UKS_REF_FUNCTIONALS = ["HF", "PBE", "PBE0", "WB97X"]
+UKS_REF_FUNCTIONALS = ["HF", "PBE", "PBE0", "WB97X", "WB97X-V", "WB97M-V"]
 # Keep UKS bases moderate (OH is light; full Ahlrichs/Dunning matrix is enough)
 UKS_BASIS_LABELS = [
     "STO-3G", "6-31G", "6-31G*", "def2SVP", "def2TZVP",
@@ -635,10 +636,18 @@ def run_pyscf_df(atoms, basis_path, aux_path, functional, charge=0, spin=0,
             mf = dft.RKS(mol).density_fit()
             mf.xc = PYSCF_XC_MAP.get(functional, functional.lower())
             mf.grids.level = grid_level
+            if functional.upper() in ("WB97X-V", "WB97M-V"):
+                # cuEST reuses the same grid for VV10 nonlocal correlation as
+                # for the semi-local XC part; PySCF's NLC grid (mf.nlcgrids)
+                # is a separate object with its own default level that does
+                # NOT follow mf.grids.level, so align it explicitly.
+                mf.nlcgrids.level = grid_level
         else:
             mf = dft.UKS(mol).density_fit()
             mf.xc = PYSCF_XC_MAP.get(functional, functional.lower())
             mf.grids.level = grid_level
+            if functional.upper() in ("WB97X-V", "WB97M-V"):
+                mf.nlcgrids.level = grid_level
         mf.max_cycle = 200
         mf.conv_tol = 1e-10
         # minao/sad: '1e' (Hcore) can converge to false minima for some

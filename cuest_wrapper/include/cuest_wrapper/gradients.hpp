@@ -223,6 +223,7 @@ inline std::vector<double> GradientComputer::compute() {
   DeviceArray<double> d_ov(n3 * sizeof(double)), d_ke(n3 * sizeof(double));
   DeviceArray<double> d_po(n3 * sizeof(double)), d_p2(n3 * sizeof(double));
   DeviceArray<double> d_df(n3 * sizeof(double)), d_xc(n3 * sizeof(double));
+  DeviceArray<double> d_xc_nlc(n3 * sizeof(double));
   DeviceArray<double> d_ecp_buf;
   if (ecp_int_)
     d_ecp_buf.alloc(n3 * sizeof(double));
@@ -378,6 +379,58 @@ inline std::vector<double> GradientComputer::compute() {
     xc_.assign(n3, 0.0);
   }
 
+  // VV10 nonlocal-correlation gradient (WB97X-V, WB97M-V): a separate cuEST
+  // API from the semi-local XC derivative above, using the same plan/Cocc
+  // buffers. UKS returns a single gradient shared by both spin channels
+  // (VV10 depends only on the total density), mirroring compute_vv10_uks.
+  bool has_vv10 = xc_builder_ && xc_builder_->is_vv10();
+  if (has_vv10) {
+    double scale = xc_builder_->vv10_scale();
+    double c = xc_builder_->vv10_c();
+    double b = xc_builder_->vv10_b();
+    if (uks_) {
+      const uint64_t nocc_a_pad = std::max<uint64_t>(nocc_a_, 1);
+      const uint64_t nocc_b_pad = std::max<uint64_t>(nocc_b_, 1);
+      cuestNonlocalXCDerivativeUKSComputeParameters_t p;
+      CUEST_CHECK(cuestParametersCreate(CUEST_NONLOCALXCDERIVATIVEUKSCOMPUTE_PARAMETERS, &p));
+      cuestParametersConfigure(CUEST_NONLOCALXCDERIVATIVEUKSCOMPUTE_PARAMETERS, p,
+          CUEST_NONLOCALXCDERIVATIVEUKSCOMPUTE_PARAMETERS_VV10_SCALE, &scale, sizeof(scale));
+      cuestParametersConfigure(CUEST_NONLOCALXCDERIVATIVEUKSCOMPUTE_PARAMETERS, p,
+          CUEST_NONLOCALXCDERIVATIVEUKSCOMPUTE_PARAMETERS_VV10_C, &c, sizeof(c));
+      cuestParametersConfigure(CUEST_NONLOCALXCDERIVATIVEUKSCOMPUTE_PARAMETERS, p,
+          CUEST_NONLOCALXCDERIVATIVEUKSCOMPUTE_PARAMETERS_VV10_B, &b, sizeof(b));
+      run_derivative(grad_temp_ws, var_buf, p, CUEST_NONLOCALXCDERIVATIVEUKSCOMPUTE_PARAMETERS,
+        [&](auto* vb, auto* td) {
+          return cuestNonlocalXCDerivativeUKSComputeWorkspaceQuery(
+              ctx_, xc_builder_->plan(), p, vb, td,
+              nocc_a_pad, nocc_b_pad, d_Co_, d_Cob_, nullptr);
+        },
+        [&](auto* vb, auto* tw) {
+          return cuestNonlocalXCDerivativeUKSCompute(
+              ctx_, xc_builder_->plan(), p, vb, tw,
+              nocc_a_pad, nocc_b_pad, d_Co_, d_Cob_, d_xc_nlc);
+        }, "vv10-grad-uks");
+    } else {
+      cuestNonlocalXCDerivativeRKSComputeParameters_t p;
+      CUEST_CHECK(cuestParametersCreate(CUEST_NONLOCALXCDERIVATIVERKSCOMPUTE_PARAMETERS, &p));
+      cuestParametersConfigure(CUEST_NONLOCALXCDERIVATIVERKSCOMPUTE_PARAMETERS, p,
+          CUEST_NONLOCALXCDERIVATIVERKSCOMPUTE_PARAMETERS_VV10_SCALE, &scale, sizeof(scale));
+      cuestParametersConfigure(CUEST_NONLOCALXCDERIVATIVERKSCOMPUTE_PARAMETERS, p,
+          CUEST_NONLOCALXCDERIVATIVERKSCOMPUTE_PARAMETERS_VV10_C, &c, sizeof(c));
+      cuestParametersConfigure(CUEST_NONLOCALXCDERIVATIVERKSCOMPUTE_PARAMETERS, p,
+          CUEST_NONLOCALXCDERIVATIVERKSCOMPUTE_PARAMETERS_VV10_B, &b, sizeof(b));
+      run_derivative(grad_temp_ws, var_buf, p, CUEST_NONLOCALXCDERIVATIVERKSCOMPUTE_PARAMETERS,
+        [&](auto* vb, auto* td) {
+          return cuestNonlocalXCDerivativeRKSComputeWorkspaceQuery(
+              ctx_, xc_builder_->plan(), p, vb, td, nocc_, d_Co_, nullptr);
+        },
+        [&](auto* vb, auto* tw) {
+          return cuestNonlocalXCDerivativeRKSCompute(
+              ctx_, xc_builder_->plan(), p, vb, tw, nocc_, d_Co_, d_xc_nlc);
+        }, "vv10-grad");
+    }
+  }
+
   // Final D2H pack (implicit sync)
   ov_.resize(n3); CUDA_CHECK(cudaMemcpy(ov_.data(), d_ov, n3 * sizeof(double), cudaMemcpyDeviceToHost));
   ke_.resize(n3); CUDA_CHECK(cudaMemcpy(ke_.data(), d_ke, n3 * sizeof(double), cudaMemcpyDeviceToHost));
@@ -393,6 +446,11 @@ inline std::vector<double> GradientComputer::compute() {
   if (xc_builder_ && !xc_builder_->is_hf()) {
     xc_.resize(n3);
     CUDA_CHECK(cudaMemcpy(xc_.data(), d_xc, n3 * sizeof(double), cudaMemcpyDeviceToHost));
+    if (has_vv10) {
+      std::vector<double> xc_nlc(n3);
+      CUDA_CHECK(cudaMemcpy(xc_nlc.data(), d_xc_nlc, n3 * sizeof(double), cudaMemcpyDeviceToHost));
+      for (size_t i = 0; i < n3; i++) xc_[i] += xc_nlc[i];
+    }
   } else if (xc_.size() != n3) {
     xc_.assign(n3, 0.0);
   }

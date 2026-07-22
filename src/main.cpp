@@ -8,6 +8,7 @@
  * ECP data is auto-detected from the JSON basis file for heavy elements.
  */
 
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -77,6 +78,26 @@ static void print_help(const char* prog) {
       << "  --jit                    Enable cuEST JIT kernels (default)\n"
       << "  --no-jit                 Disable JIT (AOT kernels, fp64)\n"
       << "  --help                   Show this help\n\n"
+      << "Advanced/tuning options (cuEST engine parameters; defaults match cuEST's own):\n"
+      << "  --max-gauss-hermite <n>       Max Gauss-Hermite quadrature points (default: 20)\n"
+      << "  --max-l-solid-harmonic <n>    Max angular momentum for solid-harmonic\n"
+      << "                                transforms (default: 10)\n"
+      << "  --max-rys <n>                 Max Rys quadrature points; 0 = largest\n"
+      << "                                available (default: 0)\n"
+      << "  --jit-cache-dir <path>        JIT kernel cache directory; must be a\n"
+      << "                                trusted, non-world-writable path (default:\n"
+      << "                                derived ~/.cuest_cache/...)\n"
+      << "  --jit-compile-threads <n>     Parallel JIT precompile worker threads,\n"
+      << "                                clamped to 256 (default: 16)\n"
+      << "  --df-fitting-cutoff <val>     Eigenvalue threshold below which DF metric\n"
+      << "                                eigenvalues are discarded (default: 1e-12)\n"
+      << "  --df-fitting-absolute         Treat --df-fitting-cutoff as absolute, not\n"
+      << "                                relative to the largest eigenvalue (default:\n"
+      << "                                relative)\n"
+      << "  --df-fitting-algorithm <alg>  DF metric inversion: qr (default, most\n"
+      << "                                robust) or matrixpower\n"
+      << "  Note: --rys-scheme is intentionally not exposed — cuEST currently\n"
+      << "  defines only one scheme, so the flag would have no effect.\n\n"
       << "Notes:\n"
       << "  Density fitting is required (--aux-basis). Closed-shell RKS\n"
       << "  (multiplicity 1) or unrestricted UKS (multiplicity > 1) are supported.\n"
@@ -123,6 +144,18 @@ int main(int argc, char* argv[]) {
   bool unrestricted = false;
   bool hcore_guess = false;
   bool sad_functional_atoms = false;
+
+  // Advanced/tuning: cuEST handle-level parameters (defaults match cuEST's own).
+  uint64_t max_gauss_hermite = 20;
+  uint64_t max_l_solid_harmonic = 10;
+  uint64_t max_rys = 0;
+  std::string jit_cache_dir;
+  int jit_compile_threads = 16;
+
+  // Advanced/tuning: cuEST DF fitting parameters (defaults match cuEST's own).
+  double df_fitting_cutoff = 1.0e-12;
+  bool df_fitting_relative = true;
+  std::string df_fitting_algorithm_name = "qr";
 
   for (int i = 1; i < argc; i++) {
     std::string arg = argv[i];
@@ -194,6 +227,22 @@ int main(int argc, char* argv[]) {
       use_jit = true;
     } else if (arg == "--no-jit") {
       use_jit = false;
+    } else if (arg == "--max-gauss-hermite" && i + 1 < argc) {
+      max_gauss_hermite = std::stoull(argv[++i]);
+    } else if (arg == "--max-l-solid-harmonic" && i + 1 < argc) {
+      max_l_solid_harmonic = std::stoull(argv[++i]);
+    } else if (arg == "--max-rys" && i + 1 < argc) {
+      max_rys = std::stoull(argv[++i]);
+    } else if (arg == "--jit-cache-dir" && i + 1 < argc) {
+      jit_cache_dir = argv[++i];
+    } else if (arg == "--jit-compile-threads" && i + 1 < argc) {
+      jit_compile_threads = std::stoi(argv[++i]);
+    } else if (arg == "--df-fitting-cutoff" && i + 1 < argc) {
+      df_fitting_cutoff = std::stod(argv[++i]);
+    } else if (arg == "--df-fitting-absolute") {
+      df_fitting_relative = false;
+    } else if (arg == "--df-fitting-algorithm" && i + 1 < argc) {
+      df_fitting_algorithm_name = argv[++i];
     } else {
       std::cerr << "Unknown argument: " << arg << "\n";
       std::cerr << "Use --help for usage information.\n";
@@ -215,6 +264,21 @@ int main(int argc, char* argv[]) {
   } else {
     std::cerr << "Warning: Unknown functional '" << functional_name
               << "'. Using PBE.\n";
+  }
+
+  cuestDFIntPlanParametersFittingAlgorithm_t df_fitting_algorithm =
+      CUEST_DFINTPLAN_PARAMETERS_FITTING_ALGORITHM_QR;
+  {
+    std::string a = df_fitting_algorithm_name;
+    for (auto& c : a) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (a == "qr") {
+      df_fitting_algorithm = CUEST_DFINTPLAN_PARAMETERS_FITTING_ALGORITHM_QR;
+    } else if (a == "matrixpower") {
+      df_fitting_algorithm = CUEST_DFINTPLAN_PARAMETERS_FITTING_ALGORITHM_MATRIXPOWER;
+    } else {
+      std::cerr << "Warning: Unknown --df-fitting-algorithm '"
+                << df_fitting_algorithm_name << "'. Using qr.\n";
+    }
   }
 
   if (!quiet) {
@@ -251,7 +315,9 @@ int main(int argc, char* argv[]) {
     }
 
     // --- Create cuEST context ---
-    CuESTContext ctx;
+    CuESTContext ctx(CuESTContextConfig{
+        max_gauss_hermite, max_l_solid_harmonic, max_rys,
+        jit_cache_dir, jit_compile_threads});
 
     // --- Build primary basis from JSON ---
     if (!quiet) {
@@ -349,7 +415,8 @@ int main(int argc, char* argv[]) {
 
     auto dfjk = std::make_unique<DFJKBuilder>(
         ctx, basis_builder.basis(), aux_basis->basis(),
-        xyz.data(), mol.natom(), ex_frac, lrc_frac, lrc_omega, use_jit);
+        xyz.data(), mol.natom(), ex_frac, lrc_frac, lrc_omega, use_jit,
+        df_fitting_cutoff, df_fitting_relative, df_fitting_algorithm);
     DFJKBuilder* dfjk_ptr = dfjk.get();
 
     // --- Set up ECP integrals ---
@@ -390,6 +457,9 @@ int main(int argc, char* argv[]) {
     sad_cfg.functional = functional;
     sad_cfg.radial_pts = radial_pts;
     sad_cfg.angular_pts = angular_pts;
+    sad_cfg.fitting_cutoff = df_fitting_cutoff;
+    sad_cfg.fitting_relative_conditioning = df_fitting_relative;
+    sad_cfg.fitting_algorithm = df_fitting_algorithm;
 
     SCFSolver scf(ctx, basis_builder, *dfjk_ptr, &xc,
                    ecp_builder_ptr, ecp_int_ptr,

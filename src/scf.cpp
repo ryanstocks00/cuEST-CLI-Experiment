@@ -79,6 +79,7 @@ SCFSolver::SCFSolver(CuESTContext& ctx, BasisBuilder& basis,
   d_K_b_.alloc(n2_bytes);
   d_Vxc_a_.alloc(n2_bytes);
   d_Vxc_b_.alloc(n2_bytes);
+  d_Vnlc_a_.alloc(n2_bytes);
   d_eigvals_.alloc(nao_ * sizeof(double));
   d_Fwork_.alloc(n2_bytes);
   d_Swork_.alloc(n2_bytes);
@@ -243,6 +244,13 @@ void SCFSolver::build_fock_rks() {
     e_xc_ = exc_val;
     double one = 1.0;
     cublasDaxpy(cublas_, nao_*nao_, &one, d_Vxc_a_, 1, d_Fock_a_, 1);
+
+    if (xc_->is_vv10()) {
+      double enlc_val = 0.0;
+      xc_->compute_vv10_rks(ncols, d_Cocc_a_, &enlc_val, d_Vnlc_a_);
+      e_xc_ += enlc_val;
+      cublasDaxpy(cublas_, nao_*nao_, &one, d_Vnlc_a_, 1, d_Fock_a_, 1);
+    }
   } else {
     e_xc_ = 0.0;
   }
@@ -302,6 +310,16 @@ void SCFSolver::build_fock_uks() {
     e_xc_ = exc_val;
     cublasDaxpy(cublas_, nao_*nao_, &one, d_Vxc_a_, 1, d_Fock_a_, 1);
     cublasDaxpy(cublas_, nao_*nao_, &one, d_Vxc_b_, 1, d_Fock_b_, 1);
+
+    if (xc_->is_vv10()) {
+      double enlc_val = 0.0;
+      xc_->compute_vv10_uks(nocc_a_pad, nocc_b_pad, d_Cocc_a_, d_Cocc_b_,
+                            &enlc_val, d_Vnlc_a_);
+      e_xc_ += enlc_val;
+      // VV10 potential is shared by both spin channels (functional of total density only).
+      cublasDaxpy(cublas_, nao_*nao_, &one, d_Vnlc_a_, 1, d_Fock_a_, 1);
+      cublasDaxpy(cublas_, nao_*nao_, &one, d_Vnlc_a_, 1, d_Fock_b_, 1);
+    }
   } else if (xc_ && xc_->is_hf()) {
     e_xc_ = 0.0;
   }
