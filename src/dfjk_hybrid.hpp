@@ -28,9 +28,13 @@ inline void hybrid_dfjk_fractions(XCBuilder::Functional /*functional*/, XCBuilde
     ex_frac = 1.0;
     return;
   }
-  if (!xc.is_hybrid()) return;
-
-  ex_frac = xc.exchange_scale();
+  // is_hybrid() and is_lrc() are independent, and must be read independently.
+  // A purely long-range-corrected functional has no *global* exact exchange —
+  // so is_hybrid() is false — while still needing full exact exchange at long
+  // range. LC-ωPBE is exactly that (hybrid=0, lrc=1, lrc_scale=1.0, ω=0.4), so
+  // returning early on !is_hybrid() left it with no exact exchange at all and
+  // silently evaluated it as a pure GGA.
+  if (xc.is_hybrid()) ex_frac = xc.exchange_scale();
   if (xc.is_lrc()) {
     lrc_frac = xc.lrc_exchange_scale();
     lrc_omega = xc.lrc_omega();

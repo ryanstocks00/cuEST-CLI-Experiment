@@ -97,6 +97,17 @@ class BasisBuilder {
   }
   [[nodiscard]] bool is_pure() const { return is_pure_ != 0; }
 
+  /// Angular momentum of each shell, in the order shells were added (which is
+  /// AO order). One entry per *contraction*, so size == nshells(). Used to
+  /// build the free-atom SO(3) commutant projector — see src/atomic_symmetry.hpp.
+  [[nodiscard]] const std::vector<int>& shell_angular_momenta() const {
+    return shell_l_;
+  }
+  /// Index of the first shell belonging to each atom, size natom()+1.
+  [[nodiscard]] const std::vector<uint64_t>& shell_offsets() const {
+    return shell_offsets_;
+  }
+
   // Cached pair list (persist owned for lifetime of BasisBuilder).
   [[nodiscard]] const OwnedAOPairList& pair_list(double threshold = 1e-14) const;
 
@@ -111,6 +122,8 @@ class BasisBuilder {
   AOBasisHandle basis_;
   uint64_t nao_{0};
   std::vector<uint64_t> ao_offsets_;
+  std::vector<int> shell_l_;
+  std::vector<uint64_t> shell_offsets_;
 
   mutable OwnedAOPairList pair_list_;
   mutable bool pair_list_ready_{false};

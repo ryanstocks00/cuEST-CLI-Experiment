@@ -31,6 +31,20 @@ from common import (  # noqa: E402
 
 REFERENCE_FILE = PROJ_DIR / "test" / "reference.json"
 
+# XC grid level for the PySCF reference. Level 3 (PySCF's default) is NOT
+# converged: it sits ~1e-5 Ha from the grid limit for a range-separated
+# functional and ~1e-6 for a GGA, which put a floor under how tight the
+# validation tolerance could be.
+#
+# Level 5 is already converged to ~2e-9 against level 6 for LIGHT elements,
+# which is why 7 was chosen originally for headroom. That check was never
+# redone for heavy elements, though, and it turns out level 7 is NOT converged
+# there: for Br2/PBE the level-7 energy is 1.1e-7 Ha off cuEST's own
+# independently grid-converged answer, while level 9 lands within 1.2e-8 (a
+# ~10x improvement); I2/PBE shows the same pattern (4.5e-7 -> 1.7e-7). Rather
+# than special-case heavy elements, 9 is used for the whole reference set.
+DEFAULT_GRID_LEVEL = 9
+
 # cuEST cuestDFSymmetricDerivativeCompute throws on hybrids for SP-only
 # orbital bases (STO-3G, 6-31G). Skip storing grads for those refs.
 # Also skip hybrid + 6-31G* for H2 (no D on H ⇒ SP-equivalent, wrong grads)
@@ -81,7 +95,7 @@ def ref_key(r):
     )
 
 
-def run_pyscf(config):
+def run_pyscf(config, grid_level=DEFAULT_GRID_LEVEL):
     atoms = load_xyz(config["xyz"])
     start = time.time()
     shell = config.get("shell", "spherical")
@@ -90,7 +104,7 @@ def run_pyscf(config):
         atoms, config["basis"], config["aux_basis"], config["functional"],
         charge=int(config.get("charge", 0)),
         spin=spin,
-        grid_level=3,
+        grid_level=grid_level,
         shell=shell,
         compute_gradient=want_gradient(config),
     )
@@ -120,6 +134,9 @@ def main():
     p.add_argument("--basis", type=str)
     p.add_argument("--shell", type=str, choices=["spherical", "cartesian"])
     p.add_argument("--output", type=str, default=str(REFERENCE_FILE))
+    p.add_argument("--grid-level", type=int, default=DEFAULT_GRID_LEVEL,
+                   help=f"PySCF XC grid level (default {DEFAULT_GRID_LEVEL}; "
+                        "3 is PySCF's default but is NOT grid-converged)")
     args = p.parse_args()
 
     matrix = build_energy_matrix(quick=args.quick)
@@ -169,7 +186,7 @@ def main():
         print(f"[{i+1}/{len(matrix)}] {label} ...", end=" ", flush=True)
 
         try:
-            r = run_pyscf(config)
+            r = run_pyscf(config, grid_level=args.grid_level)
         except Exception as e:
             r = {"error": str(e)}
 

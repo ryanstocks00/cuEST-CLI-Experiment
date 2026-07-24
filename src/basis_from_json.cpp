@@ -22,6 +22,8 @@ void BasisBuilder::build_from_json(const std::string& json_path) {
   std::vector<cuestAOShell_t> all_shells;
 
   ao_offsets_.assign(natom + 1, 0);
+  shell_offsets_.assign(natom + 1, 0);
+  shell_l_.clear();
 
   for (size_t a = 0; a < natom; a++) {
     int Z = mol_.atom(a).atomic_number;
@@ -31,6 +33,7 @@ void BasisBuilder::build_from_json(const std::string& json_path) {
 
     for (auto& js : json_shells) {
       for (auto& coeffs : js.all_coefficients) {
+        shell_l_.push_back(static_cast<int>(js.L));
         auto norm = compute_normalized_coefficients(js.L, js.nprim,
                                                      js.exponents.data(),
                                                      coeffs.data());
@@ -52,6 +55,7 @@ void BasisBuilder::build_from_json(const std::string& json_path) {
       }
     }
     ao_offsets_[a + 1] = ao_offsets_[a] + ao_count;
+    shell_offsets_[a + 1] = shell_offsets_[a] + shells_per_atom[a];
   }
 
   cuestWorkspaceDescriptor_t pers_desc{}, temp_desc{};

@@ -12,23 +12,29 @@
 
 namespace cuest {
 
-void DIIS::init(int max_space, int N) {
+void DIIS::init(int max_space, int N, int nchan) {
   N_ = N;
   n2_ = N * N;
+  packed_ = N * (N + 1) / 2;
+  nchan_ = nchan;
+  vec_ = packed_ * nchan_;
   max_space_ = max_space;
   count_ = 0;
   residual_ready_ = false;
   last_rms_ = 0.0;
 
   const size_t n2_bytes = static_cast<size_t>(n2_) * sizeof(double);
-  const size_t hist_bytes = n2_bytes * static_cast<size_t>(max_space);
+  const size_t vec_bytes = static_cast<size_t>(vec_) * sizeof(double);
+  const size_t hist_bytes = vec_bytes * static_cast<size_t>(max_space);
   d_E_.alloc(hist_bytes);
   d_F_.alloc(hist_bytes);
   d_gram_.alloc(static_cast<size_t>(max_space) * max_space * sizeof(double));
   d_coeffs_.alloc(static_cast<size_t>(max_space) * sizeof(double));
   d_tmp1_.alloc(n2_bytes);
   d_tmp2_.alloc(n2_bytes);
-  d_err_.alloc(n2_bytes);
+  d_full_.alloc(n2_bytes);
+  d_err_.alloc(vec_bytes);
+  d_work_.alloc(vec_bytes);
 }
 
 void DIIS::clear() {
@@ -40,18 +46,19 @@ void DIIS::push(cublasHandle_t blas, const double* d_err, const double* d_fock) 
   // Keep columns [0, count) packed oldest→newest for a single GEMM.
   if (count_ == max_space_) {
     for (int j = 0; j < max_space_ - 1; j++) {
-      cublasDcopy(blas, n2_, err_col(j + 1), 1, err_col(j), 1);
-      cublasDcopy(blas, n2_, fock_col(j + 1), 1, fock_col(j), 1);
+      cublasDcopy(blas, vec_, err_col(j + 1), 1, err_col(j), 1);
+      cublasDcopy(blas, vec_, fock_col(j + 1), 1, fock_col(j), 1);
     }
     count_ = max_space_ - 1;
   }
-  cublasDcopy(blas, n2_, d_err, 1, err_col(count_), 1);
-  cublasDcopy(blas, n2_, d_fock, 1, fock_col(count_), 1);
+  cublasDcopy(blas, vec_, d_err, 1, err_col(count_), 1);
+  cublasDcopy(blas, vec_, d_fock, 1, fock_col(count_), 1);
   ++count_;
 }
 
-double DIIS::compute_residual(cublasHandle_t blas, const double* d_S,
-                              const double* d_Fock, const double* d_D) {
+void DIIS::residual_channel(cublasHandle_t blas, const double* d_S,
+                            const double* d_Fock, const double* d_D,
+                            double* d_out) {
   const int N = N_;
   const int n2 = n2_;
   double one = 1.0, zero = 0.0, minus_one = -1.0;
@@ -61,38 +68,56 @@ double DIIS::compute_residual(cublasHandle_t blas, const double* d_S,
               d_Fock, N, d_D, N, &zero, d_tmp1_, N));
   CUBLAS_CHECK(cublasDgemm(blas, CUBLAS_OP_N, CUBLAS_OP_N, N, N, N, &one,
               d_tmp1_, N, d_S, N, &zero, d_tmp2_, N));
-  // SDF = (S*D)*F → d_err_
+  // SDF = (S*D)*F → d_out
   CUBLAS_CHECK(cublasDgemm(blas, CUBLAS_OP_N, CUBLAS_OP_N, N, N, N, &one,
               d_S, N, d_D, N, &zero, d_tmp1_, N));
   CUBLAS_CHECK(cublasDgemm(blas, CUBLAS_OP_N, CUBLAS_OP_N, N, N, N, &one,
-              d_tmp1_, N, d_Fock, N, &zero, d_err_, N));
-  // d_err_ = FDS - SDF
-  CUBLAS_CHECK(cublasDaxpy(blas, n2, &minus_one, d_err_, 1, d_tmp2_, 1));
-  CUBLAS_CHECK(cublasDcopy(blas, n2, d_tmp2_, 1, d_err_, 1));
+              d_tmp1_, N, d_Fock, N, &zero, d_out, N));
+  // d_out = FDS - SDF
+  CUBLAS_CHECK(cublasDaxpy(blas, n2, &minus_one, d_out, 1, d_tmp2_, 1));
+  CUBLAS_CHECK(cublasDcopy(blas, n2, d_tmp2_, 1, d_out, 1));
+}
+
+double DIIS::compute_residual(cublasHandle_t blas, const double* d_S,
+                              const double* d_Fock_a, const double* d_D_a,
+                              const double* d_Fock_b, const double* d_D_b) {
+  // Both channels go into one residual vector, so the Pulay solve below sees a
+  // single coupled error rather than two independent ones.
+  residual_channel(blas, d_S, d_Fock_a, d_D_a, d_full_);
+  diis_pack_upper(d_full_, d_err_.get(), N_);
+  if (nchan_ == 2) {
+    residual_channel(blas, d_S, d_Fock_b, d_D_b, d_full_);
+    diis_pack_upper(d_full_, d_err_.get() + packed_, N_);
+  }
 
   double ss = 0.0;
-  CUBLAS_CHECK(cublasDdot(blas, n2, d_err_, 1, d_err_, 1, &ss));
-  last_rms_ = std::sqrt(ss / static_cast<double>(n2));
+  CUBLAS_CHECK(cublasDdot(blas, vec_, d_err_, 1, d_err_, 1, &ss));
+  // The error is antisymmetric with a zero diagonal, so the packed triangle
+  // carries exactly half of the full matrix's squared norm.
+  last_rms_ = std::sqrt(2.0 * ss / static_cast<double>(n2_ * nchan_));
   residual_ready_ = true;
   return last_rms_;
 }
 
-void DIIS::extrapolate(cublasHandle_t blas, DeviceArray<double>& d_Fock) {
+void DIIS::extrapolate(cublasHandle_t blas, DeviceArray<double>& d_Fock_a,
+                       DeviceArray<double>* d_Fock_b) {
   NvtxRange range("DIIS");
   if (!residual_ready_) return;
 
-  const int n2 = n2_;
   double one = 1.0, zero = 0.0;
 
-  push(blas, d_err_, d_Fock);
+  // Pack both Focks into one history vector, matching the residual layout.
+  diis_pack_upper(d_Fock_a, d_work_.get(), N_);
+  if (nchan_ == 2) diis_pack_upper(*d_Fock_b, d_work_.get() + packed_, N_);
+  push(blas, d_err_, d_work_);
   residual_ready_ = false;
 
   const int nvec = count_;
   if (nvec < 2) return;
 
-  // Gram = Eᵀ E  (nvec × nvec), E is n2 × nvec column-major
-  cublasDgemm(blas, CUBLAS_OP_T, CUBLAS_OP_N, nvec, nvec, n2, &one,
-              d_E_, n2, d_E_, n2, &zero, d_gram_, nvec);
+  // Gram = Eᵀ E  (nvec × nvec), E is vec_ × nvec column-major
+  cublasDgemm(blas, CUBLAS_OP_T, CUBLAS_OP_N, nvec, nvec, vec_, &one,
+              d_E_, vec_, d_E_, vec_, &zero, d_gram_, nvec);
 
   std::vector<double> gram(static_cast<size_t>(nvec) * nvec);
   CUDA_CHECK(cudaMemcpy(gram.data(), d_gram_,
@@ -168,12 +193,16 @@ void DIIS::extrapolate(cublasHandle_t blas, DeviceArray<double>& d_Fock) {
   for (int i = 0; i < nvec; i++)
     coeffs[static_cast<size_t>(i)] *= dscale[static_cast<size_t>(i)];
 
-  // F_diis = F_hist * c[0:nvec]   (n2 × 1)
+  // F_diis = F_hist * c[0:nvec], then unpack back into each channel. One
+  // coefficient set drives both spins — that is the whole point.
   CUDA_CHECK(cudaMemcpy(d_coeffs_, coeffs.data(),
                         static_cast<size_t>(nvec) * sizeof(double),
                         cudaMemcpyHostToDevice));
-  cublasDgemv(blas, CUBLAS_OP_N, n2, nvec, &one, d_F_, n2, d_coeffs_, 1, &zero,
-              d_Fock, 1);
+  cublasDgemv(blas, CUBLAS_OP_N, vec_, nvec, &one, d_F_, vec_, d_coeffs_, 1,
+              &zero, d_work_, 1);
+  diis_unpack_upper(d_work_.get(), d_Fock_a, N_, /*symmetric=*/true);
+  if (nchan_ == 2)
+    diis_unpack_upper(d_work_.get() + packed_, *d_Fock_b, N_, /*symmetric=*/true);
 }
 
 }  // namespace cuest

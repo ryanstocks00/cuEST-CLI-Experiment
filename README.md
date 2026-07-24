@@ -12,6 +12,8 @@ A C++ DFT package built on [NVIDIA cuEST](https://developer.nvidia.com/cuda/cuda
 
 - **Full SCF**: RKS (Restricted Kohn-Sham) with density fitting (RI-JK)
 - **DIIS**: Direct inversion in iterative subspace, configurable space and start
+- **SAD initial guess**: Superposition of atomic densities from spherically
+  symmetric free-atom HF, with fractionally occupied MOs
 - **Gradients**: Analytic or numerical finite differences
 - **Functionals**: PBE, B3LYP, B3LYP5, PBE0, CAM-B3LYP, ωB97X, ωB97X-V, ωB97M-V, HSE06, M06, M06-2X, LC-ωPBE, LC-ωPBEh
   (ωB97X-V/ωB97M-V include the VV10 nonlocal-correlation term via cuEST's separate nonlocal XC potential API)
@@ -105,12 +107,20 @@ Optional arguments:
   --radial-pts <n>         Radial grid points (default: 75)
   --angular-pts <n>        Angular Lebedev points (default: 302)
   --charge <int>           Total charge (default: 0)
-  --multiplicity <int>     Spin multiplicity (default: 1; UKS if ≠ 1)
-  --break-symmetry <rad>   UKS β HOMO/LUMO mix angle (default: 0.3)
+  --multiplicity <int>     Spin multiplicity (default: 1)
+  --unrestricted, --uks    Solve unrestricted even at multiplicity 1
+  --break-symmetry <rad>   UKS β HOMO/LUMO mix angle (default: 0.1);
+                           only applied when nalpha == nbeta
+
+Initial guess options:
+  --hcore-guess            Use the bare core-Hamiltonian guess instead of SAD
+  --sad-functional-atoms   Solve the SAD reference atoms with the molecular
+                           functional instead of HF (default HF matches PySCF
+                           and needs no XC grid)
 
 SCF convergence options:
   --max-iter <n>           Max SCF iterations (default: 250)
-  --conv-thresh <val>      DIIS error |FDS-SDF| convergence (default: 1e-6)
+  --conv-thresh <val>      Orbital-gradient norm |g| convergence (default: 1e-4)
   --energy-conv <val>      Energy change convergence (default: 1e-8)
   --diis-start <n>         Iteration to enable DIIS (default: 1)
   --diis-space <n>         DIIS subspace dimension (default: 6)
@@ -152,8 +162,9 @@ Advanced/tuning options (cuEST engine parameters; defaults match cuEST's own):
 Notes:
   Density fitting is required. Closed-shell RKS (multiplicity 1) and
   unrestricted UKS (multiplicity > 1) are supported. For UKS,
-  `--break-symmetry` mixes the β HOMO/LUMO after the first diagonalization
-  (including open-shell radicals with a degenerate β frontier). Analytic
+  `--break-symmetry` mixes the β HOMO/LUMO after the first diagonalization,
+  but only when nalpha == nbeta (an artificially closed-shell guess); a
+  genuinely spin-polarised system has no symmetry to break. Analytic
   gradients are available for both RKS and UKS (spherical orbitals).
   ECP data is auto-detected from the JSON basis.
 
@@ -169,7 +180,87 @@ Available functionals:
   HSE06 M06 M06-2X LC-WPBE LC-WPBEH WB97X
 ```
 
+## Initial guess (SAD)
+
+The SCF starts from a superposition of atomic densities. Each distinct element
+is solved once as an isolated free atom under an explicit spherical-symmetry
+constraint, cached to disk (`$CUEST_SAD_CACHE_DIR`, else
+`~/.cache/cuest_dft/sad_guess`), and superposed at each atom's AO offset.
+
+**Imposing spherical symmetry.** The constraint is applied by *projecting* the
+atomic Fock onto the commutant of the AO rotation representation every
+iteration:
+
+```
+P(X) = ∫dR U(R) X U(R)ᵀ
+```
+
+By Schur's lemma that commutant is exactly the l-block structure, so this is
+precisely "minimise the energy over spherically symmetric densities" — but it
+needs only the rotation *action* on the AOs, never an explicit l-decomposition.
+That is what lets pure and Cartesian bases share one code path. A Cartesian
+shell of angular momentum L spans L ⊕ L−2 ⊕ … and is therefore not a single
+irrep, so the usual "reshape the l-block and average over m" trick (PySCF's
+`AtomSphAverageRHF.eig`) cannot be applied to it at all.
+
+Two details that are easy to get wrong:
+
+- Cartesian AOs within a shell are **not orthonormal**, so `U(R)` is not
+  orthogonal and operator matrices (`F`, `S`) and density matrices transform
+  differently — `UᵀXU = X` versus `U D Uᵀ = D`. Both projectors exist; using one
+  where the other belongs silently destroys the symmetry.
+- The Euler-angle integral factorises (`U` is a homomorphism and
+  `(A₁A₂)⊗(B₁B₂) = (A₁⊗B₁)(A₂⊗B₂)`), which turns the quadrature into two dense
+  matmuls — ~15× faster for a QZ-basis transition metal.
+
+**Fractional occupations.** After projection the eigenvalues are exactly
+(2l+1)-fold degenerate, so a manifold's size identifies its l and whole
+manifolds are occupied at equal fractional occupancy. Carbon's 2p comes out as
+2/3 of an electron in each of px, py, pz rather than an arbitrary choice of
+which two real p orbitals to fill. Occupations come from the reference
+configurations in `atomic_config_table.inc` (PySCF's `NRSRHF_CONFIGURATION`,
+from Phys. Rev. A **101**, 012516), which beat naive Aufbau for transition
+metals.
+
+The reference is stored as columns pre-scaled by √occupancy, so
+`D = C diag(occ) Cᵀ = (C√occ)(C√occ)ᵀ` feeds cuEST's DF-K directly — that API
+takes occupied MO coefficients, not an arbitrary density matrix.
+
+**Atoms are HF by default**, matching PySCF (whose SAD uses atomic HF whatever
+the molecular functional). That needs no XC grid and is functional-independent,
+so one cached atom serves every functional. `--sad-functional-atoms` solves them
+with the molecular functional instead; `--hcore-guess` disables SAD entirely.
+
 ## Validation
+
+### SAD atomic reference vs PySCF
+
+```bash
+python3 test/validate_sad.py
+```
+
+Spherical-basis atoms reproduce PySCF's `AtomSphAverageRHF` to ~1e-12 Ha and
+~1e-8 in every density-matrix element (same method, same DF auxiliary).
+
+Two lower-level checks back that up:
+
+```bash
+./build/test_atomic_symmetry                     # GPU-free: rotation algebra
+./build/probe_symmetry <basis.json> <Z> --cartesian   # vs a real cuEST overlap
+```
+
+`probe_symmetry` is the one that matters for conventions: a free atom's overlap
+is spherically symmetric, so `U(R)ᵀ S U(R) = S` must hold exactly. That single
+condition validates cuEST's Cartesian AO ordering *and* its per-shell
+normalization *and* the rotation code at once, so a convention change fails
+loudly instead of quietly degrading the guess.
+
+Cartesian atoms deliberately do **not** match: PySCF forms its atom in a
+spherical basis and maps it up with `cart2sph`, leaving the Cartesian
+contaminant functions at exactly zero density, whereas here they are part of
+the variational space. The result is a slightly *better* guess (energy lower by
+~1e-4 Ha), so it is checked variationally — Cartesian energy ≤ spherical — not
+against PySCF.
 
 ### Energy matrix vs PySCF-DF
 
@@ -248,7 +339,9 @@ src/                           # CLI / application layer
 ├── functionals.hpp            # CLI string ↔ XCBuilder::Functional registry
 ├── scf.hpp / scf.cpp          # SCF solver with DIIS + cuSOLVER
 ├── diis.hpp / diis.cpp        # Device Pulay DIIS
-├── sac_guess.hpp / sac_guess.cpp  # SAC initial guess (cached atomic UKS)
+├── sad_guess.hpp / sad_guess.cpp  # SAD initial guess (cached atomic HF)
+├── atomic_symmetry.hpp / .cpp # SO(3) commutant projector for free atoms
+├── atomic_config.hpp / .cpp   # Reference configs + fractional occupations
 ├── dfjk_hybrid.hpp            # Hybrid/LRC DF-JK exchange fractions (queried from cuEST's XC plan)
 ├── basis_from_json.cpp        # BasisBuilder / AuxBasis from BSE JSON
 ├── basis_ecp_from_json.cpp    # ECPBuilder from BSE JSON
@@ -262,6 +355,7 @@ test/
 ├── download_bases.py          # Fetch orbital/aux bases from BSE
 ├── generate_reference.py      # Build test/reference.json (PySCF-DF)
 ├── validate_cuest.py          # Compare cuEST vs reference.json
+├── validate_sad.py            # Compare the SAD atomic reference vs PySCF
 ├── validate_energy.py         # Live side-by-side energy matrix
 ├── validate_full.py           # Gradient spot checks
 └── test_water.py              # H2O smoke test
