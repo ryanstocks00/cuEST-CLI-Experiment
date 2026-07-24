@@ -22,16 +22,16 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (  # noqa: E402
-    BASIS_DIR, BASIS_SETS, EXE, MOLECULES_DIR, PROJ_DIR, as_grad_nx3, aux_json_for,
-    aux_json_from_label, aux_label_for, flatten_grad, is_finite,
-    parse_cuest_energy, parse_cuest_scf_iterations, parse_gradient_block,
+    BASIS_DIR, BASIS_SETS, EXE, LRC_FUNCTIONALS, MOLECULES_DIR, PROJ_DIR,
+    as_grad_nx3, aux_json_for, aux_json_from_label, aux_label_for, flatten_grad,
+    is_finite, parse_cuest_energy, parse_cuest_scf_iterations, parse_gradient_block,
 )
 
 REFERENCE_FILE = PROJ_DIR / "test" / "reference.json"
 RESULTS_FILE = PROJ_DIR / "test" / "cuest_results.json"
 
 
-def run_cuest(config, timeout=600):
+def run_cuest(config, timeout=600, radial_pts=150, angular_pts=770):
     """Run cuEST DFT and return parsed results.
 
     Requests an analytic gradient only when the config asks for it (spherical
@@ -41,6 +41,13 @@ def run_cuest(config, timeout=600):
     shell = config.get("shell", "spherical")
     want_grad = config.get("check_gradient", shell == "spherical")
     multiplicity = int(config.get("multiplicity", 1))
+    # Tight and uniform regardless of multiplicity: the old multiplicity != 1
+    # branch loosened both thresholds by 10x to work around independent-channel
+    # DIIS oscillating on open-shell systems (OH needed up to 251 iterations at
+    # 1e-8). Joint DIIS (one Pulay coefficient set over both spin channels,
+    # matching PySCF) fixed that at the root — OH now converges in single
+    # digits to low tens of iterations at these same tight thresholds — so the
+    # workaround no longer earns its keep and only hid real convergence issues.
     cmd = [
         str(EXE),
         "--xyz", config["xyz"],
@@ -48,18 +55,23 @@ def run_cuest(config, timeout=600):
         "--aux-basis", aux_path,
         "--functional", config["functional"],
         "--multiplicity", str(multiplicity),
-        "--max-iter", "250",
-        "--conv-thresh", "1e-8",
-        "--energy-conv", "1e-8",
+        "--max-iter", "400",
+        "--conv-thresh", "1e-7",
+        "--energy-conv", "1e-10",
+        # cuEST's own default grid (75 radial / 302 angular) is NOT converged
+        # to the tolerances used below: on H2O/PBE/def2SVP it alone accounts
+        # for essentially the entire ~1.5e-6 Ha gap against a grid-7 PySCF
+        # reference, which vanishes (down to ~3e-8) once the grid is
+        # tightened. The references are grid-converged (see
+        # generate_reference.py); this side has to match or every non-LRC
+        # comparison is dominated by our own grid truncation, not physics.
+        "--radial-pts", str(radial_pts),
+        "--angular-pts", str(angular_pts),
         "--quiet",
         "--cartesian" if shell == "cartesian" else "--spherical",
     ]
     if want_grad:
         cmd.append("--analytic-gradient")
-    # UKS DIIS can oscillate on tiny bases — mild damping helps.
-    if multiplicity != 1:
-        cmd.extend(["--max-iter", "400", "--conv-thresh", "1e-7",
-                     "--energy-conv", "1e-7"])
 
     start = time.time()
     try:
@@ -81,11 +93,14 @@ def run_cuest(config, timeout=600):
                 "wall_s": elapsed}
 
     energy, converged = parse_cuest_energy(text)
-    # Soft-accept UKS when energy is finite but formal convergence flag is unset
-    # (DIIS oscillation near the minimum on small bases).
     if energy is None:
         return {"ok": False, "error": "could not parse energy or non-finite", "wall_s": elapsed}
-    if not converged and multiplicity == 1:
+    # Require real convergence for both RKS and UKS. The UKS soft-accept this
+    # used to have (finite energy but no convergence flag) was working around
+    # independent-channel DIIS oscillating near the minimum on open-shell
+    # systems; joint DIIS fixed that, so a non-converged UKS run now signals a
+    # real problem rather than an expected rough edge.
+    if not converged:
         return {"ok": False, "error": "SCF did not converge", "energy_ha": energy,
                 "converged": False, "wall_s": elapsed}
 
@@ -126,10 +141,31 @@ def main():
                    help="Only density-fitted references")
     p.add_argument("--exact", dest="density_fitting", action="store_const", const=False,
                    help="Only non-DF (exact integral) references")
-    p.add_argument("--tolerance-ha", type=float, default=1e-3,
-                   help="Max |ΔE| in Ha (default: 1e-3; LRC/ECP residuals)")
-    p.add_argument("--grad-tol", type=float, default=5e-4,
-                   help="Max RMS |Δg| in Ha/bohr (default: 5e-4)")
+    p.add_argument("--tolerance-ha", type=float, default=1e-7,
+                   help="Max |ΔE| in Ha for non-LRC functionals (default: 1e-7)")
+    p.add_argument("--grad-tol", type=float, default=1e-5,
+                   help="Max RMS |Δg| in Ha/bohr for non-LRC functionals "
+                        "(default: 1e-5)")
+    p.add_argument("--lrc-tolerance-ha", type=float, default=3e-4,
+                   help="Max |ΔE| in Ha for LRC_FUNCTIONALS (default: 3e-4; "
+                        "see common.LRC_FUNCTIONALS for why these need a floor "
+                        "-- cc-pvtz-jkfit is a further, larger outlier within "
+                        "this group at ~1.7e-4)")
+    p.add_argument("--lrc-grad-tol", type=float, default=1e-4,
+                   help="Max RMS |Δg| in Ha/bohr for LRC_FUNCTIONALS (default: 1e-4)")
+    p.add_argument("--radial-pts", type=int, default=150,
+                   help="cuEST radial grid points (default: 150; must be "
+                        "converged to match the grid-7 PySCF references. "
+                        "The 99/590 'standard' combo fails (H2O/def2QZVPP is "
+                        "off by ~1.2e-7); the missing ingredient is angular, "
+                        "not radial -- 200/590 still leaves ~1.1e-7 on CH4, "
+                        "so 590 is simply insufficient regardless of radial "
+                        "points. Angular=770 fixes it at any radial>=150 "
+                        "(worst residual ~2.4e-8 across 13 molecule/basis "
+                        "combos tested); 200/770 gives no further improvement "
+                        "over 150/770, so 150 is used to save cost)")
+    p.add_argument("--angular-pts", type=int, default=770,
+                   help="cuEST angular (Lebedev) grid points (default: 770)")
     args = p.parse_args()
 
     if not EXE.exists():
@@ -221,7 +257,8 @@ def main():
                  f"{config['basis_label']}/{config['shell']}"
                  f"/df:{config['aux_basis_label']}")
         print(f"[{i+1}/{len(testable)}] {label} ...", end=" ", flush=True)
-        cuest_r = run_cuest(config)
+        cuest_r = run_cuest(config, radial_pts=args.radial_pts,
+                           angular_pts=args.angular_pts)
 
         if not cuest_r["ok"]:
             print(f"FAILED: {cuest_r['error']}")
@@ -232,12 +269,16 @@ def main():
             n_error += 1
             continue
 
+        is_lrc = config["functional"] in LRC_FUNCTIONALS
+        tol_e = args.lrc_tolerance_ha if is_lrc else args.tolerance_ha
+        tol_g = args.lrc_grad_tol if is_lrc else args.grad_tol
+
         diff = cuest_r["energy_ha"] - ref["energy_ha"]
-        energy_ok = abs(diff) < args.tolerance_ha
+        energy_ok = abs(diff) < tol_e
 
         g_rms = grad_rms(cuest_r.get("gradient_ha_bohr"),
                          ref.get("gradient_ha_bohr"))
-        grad_ok = g_rms is not None and g_rms < args.grad_tol
+        grad_ok = g_rms is not None and g_rms < tol_g
         if ref.get("gradient_ha_bohr") is None:
             grad_ok = True
             g_rms = None
@@ -277,6 +318,7 @@ def main():
             "cuest_wall_s": cuest_r["wall_s"],
             "energy_diff_ha": diff,
             "grad_rms_ha_bohr": g_rms,
+            "lrc_tolerance_applied": is_lrc,
             "scf_iter_delta": iter_delta,
             "energy_ok": energy_ok,
             "grad_ok": grad_ok,
@@ -287,6 +329,8 @@ def main():
     print(f"  RESULTS: {n_pass} PASS, {n_fail} FAIL, {n_error} ERROR  "
           f"(of {len(testable)})")
     print(f"  Energy tol: {args.tolerance_ha} Ha | Grad RMS tol: {args.grad_tol}")
+    print(f"  LRC functionals ({', '.join(sorted(LRC_FUNCTIONALS))}):")
+    print(f"    Energy tol: {args.lrc_tolerance_ha} Ha | Grad RMS tol: {args.lrc_grad_tol}")
     print(f"{'='*60}")
 
     if n_fail > 0:

@@ -36,12 +36,14 @@ REFERENCE_FILE = PROJ_DIR / "test" / "reference.json"
 # functional and ~1e-6 for a GGA, which put a floor under how tight the
 # validation tolerance could be.
 #
-# Level 5 is already converged to ~2e-9 against level 6, so 7 is chosen for
-# headroom rather than necessity: the references are regenerated rarely and
-# then compared against tightly, so it is worth buying the margin once. It is
-# a real cost — roughly an order of magnitude over level 3 once the VV10
-# functionals are included — so a full regeneration takes hours, not minutes.
-DEFAULT_GRID_LEVEL = 7
+# Level 5 is already converged to ~2e-9 against level 6 for LIGHT elements,
+# which is why 7 was chosen originally for headroom. That check was never
+# redone for heavy elements, though, and it turns out level 7 is NOT converged
+# there: for Br2/PBE the level-7 energy is 1.1e-7 Ha off cuEST's own
+# independently grid-converged answer, while level 9 lands within 1.2e-8 (a
+# ~10x improvement); I2/PBE shows the same pattern (4.5e-7 -> 1.7e-7). Rather
+# than special-case heavy elements, 9 is used for the whole reference set.
+DEFAULT_GRID_LEVEL = 9
 
 # cuEST cuestDFSymmetricDerivativeCompute throws on hybrids for SP-only
 # orbital bases (STO-3G, 6-31G). Skip storing grads for those refs.
